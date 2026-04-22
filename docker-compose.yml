@@ -1,3 +1,5 @@
+version: '3.8'
+
 services:
   mysql:
     image: mysql:8.0
@@ -13,20 +15,22 @@ services:
       - ./mysql:/docker-entrypoint-initdb.d
     command: --default-authentication-plugin=mysql_native_password
 
-
   backend:
     build: ./backend
     container_name: madressa_backend
     restart: always
     depends_on:
       - mysql
+    volumes:
+      - ./backend:/app           # Syncs backend code
+      - /app/node_modules        # Keeps container modules separate
     environment:
       DB_HOST: mysql
       DB_USER: root
       DB_PASS: rootpassword
       DB_NAME: madressa_portal
       JWT_SECRET: supersecretkey
-      NODE_ENV: production
+      NODE_ENV: development      # Changed to development for hot-reload
     ports:
       - "4000:4000"
 
@@ -38,6 +42,12 @@ services:
       - backend
     ports:
       - "5173:5173"
+    volumes:
+      - ./frontend:/app          # Syncs frontend code for Fast Refresh
+      - /app/node_modules        # Keeps container modules separate
+    environment:
+      - CHOKIDAR_USEPOLLING=true
+      - VITE_WATCH_USE_POLLING=true
 
 volumes:
   mysql_data:
