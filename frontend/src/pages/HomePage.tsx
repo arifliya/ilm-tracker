@@ -1,8 +1,18 @@
+import {
+  HomeFeatures,
+  HomeHeader,
+  HomeHero,
+  HomeImpact
+} from '../components/organisms/home';
+import { homePageStyles as styles } from '../components/styles/homePageStyles';
+
 export default function HomePage() {
   return (
-    <div>
-      <h1>Welcome to the Madressa Portal</h1>
-      <p>Please login or register to continue.</p>
-    </div>
+    <main style={styles.screen}>
+      <HomeHeader />
+      <HomeHero />
+      <HomeFeatures />
+      <HomeImpact />
+    </main>
   );
 }

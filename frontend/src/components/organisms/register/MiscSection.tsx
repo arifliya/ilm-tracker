@@ -11,7 +11,7 @@ export function MiscSection({ data, onFieldChange }: Props) {
   return (
     <>
       <SectionTitle>Misc</SectionTitle>
-      <FormField label="Details of previous madrasah">
+      <FormField label="Previous institution details">
         <TextAreaInput
           value={data.previousMadrasahDetails}
           onChange={value => onFieldChange('previousMadrasahDetails', value)}

@@ -1,4 +1,5 @@
 import { useMemo, useState, type FormEvent } from 'react';
+import { Link } from 'react-router-dom';
 import { api } from '../api';
 import { registerFormStyles as styles } from '../components/styles/registerFormStyles';
 import {
@@ -11,6 +12,7 @@ import {
   type FieldUpdater,
   type RegisterFormData
 } from '../components/organisms/register';
+import { HomeHeader } from '../components/organisms/home';
 
 export default function RegisterPage() {
   const [formData, setFormData] = useState<RegisterFormData>({
@@ -78,18 +80,33 @@ export default function RegisterPage() {
 
   return (
     <div style={styles.screen}>
-      <div style={styles.container}>
-        <h2 style={styles.title}>Student Registration</h2>
-        {message && <p style={styles.message}>{message}</p>}
+      <HomeHeader />
+      <div style={styles.content}>
+        <div style={styles.container}>
+          <h2 style={styles.title}>Student Registration</h2>
+          <p style={styles.subtitle}>
+            Complete the enrollment form to create a new student portal account.
+          </p>
+          {message && <p style={styles.message}>{message}</p>}
 
-        <form onSubmit={handleSubmit} style={styles.form}>
-          <StudentDetailsSection data={formData} onFieldChange={onFieldChange} />
-          <GuardianDetailsSection data={formData} onFieldChange={onFieldChange} />
-          <EmergencyContactsSection data={formData} onFieldChange={onFieldChange} />
-          <HealthDisabilitySection data={formData} onFieldChange={onFieldChange} />
-          <MiscSection data={formData} onFieldChange={onFieldChange} />
-          <LoginDetailsSection data={formData} onFieldChange={onFieldChange} />
-      </form>
+          <form onSubmit={handleSubmit} style={styles.form}>
+            <StudentDetailsSection data={formData} onFieldChange={onFieldChange} />
+            <GuardianDetailsSection data={formData} onFieldChange={onFieldChange} />
+            <EmergencyContactsSection data={formData} onFieldChange={onFieldChange} />
+            <HealthDisabilitySection data={formData} onFieldChange={onFieldChange} />
+            <MiscSection data={formData} onFieldChange={onFieldChange} />
+            <LoginDetailsSection data={formData} onFieldChange={onFieldChange} />
+          </form>
+
+          <div style={styles.helperLinks}>
+            <Link to="/" style={styles.helperLink}>
+              Back to Home
+            </Link>
+            <Link to="/login" style={styles.helperLink}>
+              Already have an account? Login
+            </Link>
+          </div>
+        </div>
       </div>
     </div>
   );

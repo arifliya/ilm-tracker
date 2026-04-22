@@ -40,7 +40,7 @@ export default function AdminPage() {
 
   return (
     <div>
-      <h2>Madressa Administrator</h2>
+      <h2>Portal Administrator</h2>
 
       <section>
         <h3>Create Class</h3>
