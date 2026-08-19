@@ -1,0 +1,7 @@
+.DS_Store
+backend/.DS_Store
+frontend/.DS_Store
+frontend/src/.DS_Store
+frontend/dist/
+node_modules/
+mysql/init.backup

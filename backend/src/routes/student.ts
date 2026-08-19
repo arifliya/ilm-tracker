@@ -1,0 +1,54 @@
+import { Router } from "express";
+import { pool } from "../config/db";
+import { authMiddleware, requireRole } from "../middleware/auth";
+import { AuthenticatedRequest } from "../types/auth";
+
+const router = Router();
+
+const STUDENT_ONLY = requireRole("student");
+
+// GET classes student is enrolled in
+router.get("/classes", authMiddleware, STUDENT_ONLY, async (req: AuthenticatedRequest, res) => {
+  try {
+    const studentUserId = req.user!.userId;
+
+    const [rows] = await pool.query(
+      `SELECT c.id, c.class_name, c.year_group
+       FROM students s
+       JOIN student_classes sc ON sc.student_id = s.id
+       JOIN classes c ON c.id = sc.class_id
+       WHERE s.user_id = ?`,
+      [studentUserId]
+    );
+
+    res.json({ classes: rows });
+  } catch (err) {
+    console.error("Student classes error:", err);
+    res.status(500).json({ message: "Failed to load classes" });
+  }
+});
+
+// GET tasks assigned to student's class
+router.get("/tasks", authMiddleware, STUDENT_ONLY, async (req: AuthenticatedRequest, res) => {
+  try {
+    const studentUserId = req.user!.userId;
+
+    const [rows] = await pool.query(
+      `SELECT t.id, t.title, t.description, t.due_date, c.class_name,
+              t.student_id IS NOT NULL AS is_independent
+       FROM tasks t
+       JOIN classes c ON t.class_id = c.id
+       JOIN student_classes sc ON sc.class_id = c.id
+       JOIN students s ON s.id = sc.student_id
+       WHERE s.user_id = ? AND (t.student_id IS NULL OR t.student_id = s.id)`,
+      [studentUserId]
+    );
+
+    res.json({ tasks: rows });
+  } catch (err) {
+    console.error("Student tasks error:", err);
+    res.status(500).json({ message: "Failed to load tasks" });
+  }
+});
+
+export default router;
