@@ -1,0 +1,4700 @@
+openapi: 3.0.3
+info:
+  title: Ilm School Portal API
+  version: 1.0.0
+  description: |-
+    Multi-school (multi-tenant) school management API. Every role except
+    `system_admin` is scoped to exactly one school (`schoolId` on the JWT);
+    `system_admin` is a platform-level role with no school of its own and
+    can act across every school.
+
+    **Auth**: session is an httpOnly `token` cookie (JWT), set by
+    `POST /auth/login` and cleared by `POST /auth/logout`. There is no
+    bearer-token flow — the cookie is sent automatically by the browser on
+    same-origin requests (`withCredentials: true` on the frontend's axios
+    client). A request with no cookie, an invalid/expired token, or a
+    revoked token (see below) gets `401`.
+
+    **Session lifetime**: tokens are signed for 1 hour. Any authenticated
+    request past the halfway point of that window silently reissues the
+    cookie, so an active user is never hard-logged-out mid-session — only
+    genuine inactivity lets it expire. That sliding renewal is itself capped
+    at 12 hours from the original login (`sessionStartedAt` in the token),
+    so a session can't be kept alive indefinitely just by staying active —
+    after 12 hours the user has to log in again regardless of activity.
+    Logging out invalidates the token server-side immediately (via a
+    `token_version` check on every request), not just client-side — and
+    because there's no per-device session tracking, logging out on one
+    device invalidates all of a user's active
+    sessions.
+
+    **Feature flags**: several endpoints are gated by a per-school feature
+    flag (`attendance_report`, `notifications`, `student_notes`,
+    `report_cards`, `timetable`) and 403 with a "currently disabled"
+    message when the flag is off for the caller's school. See
+    `GET /features` to check flag state.
+
+    **Rate limits**: `POST /auth/login` and `POST /auth/change-password`
+    each allow 10 requests per 15 minutes per IP; `POST /auth/check-duplicate`,
+    `POST /auth/register-parent`, and `POST /auth/register-staff` share a
+    combined 30 requests per hour per IP, as does
+    `POST /admin/users/{id}/reset-password`. All return `429` with
+    `{ "message": "..." }` once exceeded.
+  contact:
+    name: Ilm School Portal
+servers:
+  - url: 'http://localhost:4000/api'
+    description: Local dev (docker-compose)
+  - url: /api
+    description: Relative to whatever origin is serving the frontend
+security:
+  - cookieAuth: []
+tags:
+  - name: Auth
+    description: 'Registration, login/logout, session'
+  - name: Health
+    description: 'Liveness/readiness, unauthenticated'
+  - name: Admin
+    description: 'Classes, staff, students/parents, users, roles, attendance reports — admin/owner/maintainer/system_admin, all school-scoped except for system_admin'
+  - name: Parent
+    description: A parent's own children and their tasks
+  - name: Teacher
+    description: 'A teacher''s own classes, attendance, and tasks'
+  - name: Student
+    description: A student's own classes and tasks (read-only)
+  - name: System Admin
+    description: Platform-level — schools and the feature flag catalog. system_admin only.
+  - name: Features
+    description: Effective feature-flag state for the caller's school
+  - name: Notifications
+    description: 'Send/read school-wide notifications, gated by the `notifications` flag'
+  - name: Notes
+    description: 'Private per-student staff notes, gated by the `student_notes` flag'
+  - name: Report Cards
+    description: 'Per-subject grades by school term, gated by the `report_cards` flag. Visible to admin, teacher, and parent only — never the student'
+  - name: Timetable
+    description: 'Weekly class schedules and a school events calendar, gated by the `timetable` flag. Admin and owner only'
+  - name: Fees
+    description: 'Monthly fee periods, per-student payment status, and mark-as-paid, gated by the `fees` flag. Admin and treasurer only — deliberately excludes owner'
+paths:
+  /:
+    get:
+      tags:
+        - Health
+      summary: Liveness — process is up
+      security: []
+      responses:
+        '200':
+          description: Backend process is running (does not check DB connectivity — see /healthz)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: ilm backend running
+      operationId: get
+  /healthz:
+    get:
+      tags:
+        - Health
+      summary: Readiness — process is up AND the DB is reachable
+      description: Used by the Docker healthcheck / any orchestrator. Runs `SELECT 1` against the pool. Also reports current DB connection pool utilization, so a saturated pool is visible before it starts causing timeouts elsewhere.
+      security: []
+      responses:
+        '200':
+          description: DB reachable
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+                  pool:
+                    $ref: '#/components/schemas/PoolStats'
+        '503':
+          description: DB unreachable
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: error
+                  pool:
+                    $ref: '#/components/schemas/PoolStats'
+      operationId: getHealthz
+  /auth/check-duplicate:
+    post:
+      tags:
+        - Auth
+      summary: Check whether an email or address is already registered
+      description: Used by the registration form for inline "this email is taken" feedback. Rate-limited alongside register-*.
+      security: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                email:
+                  type: string
+                  format: email
+                address1:
+                  type: string
+                postcode:
+                  type: string
+      responses:
+        '200':
+          description: 'Always 200 — the "duplicate" result is in the body, not the status code'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  exists:
+                    type: boolean
+                  reason:
+                    type: string
+                    enum:
+                      - email
+                      - address
+                    description: Present only when exists is true
+        '429':
+          $ref: '#/components/responses/RateLimited'
+      operationId: postAuthCheckDuplicate
+  /auth/register-parent:
+    post:
+      tags:
+        - Auth
+      summary: Register a parent + one or more children (pending approval)
+      description: |-
+        Always creates the account with role `pending` and
+        `requested_role=parent` — an admin/owner (or system_admin, except
+        for parent requests — see the approve endpoint) must approve it.
+        Children are inserted and assigned to their class immediately,
+        ahead of approval, with this parent as their first guardian
+        (`student_guardians` row, status `approved`). At least one of
+        `students`/`guardian_links` is required. `guardian_links` requests
+        to link as an *additional* guardian on an existing child (found by
+        `guardian_code`) instead of creating a new one — those start as
+        `pending` and are flipped to `approved` automatically when this
+        whole registration is approved, alongside the account itself.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - user_type
+                - parent
+                - students
+                - school_code
+              properties:
+                user_type:
+                  type: string
+                  enum:
+                    - parent
+                school_code:
+                  type: string
+                  description: Resolves which school this registration belongs to
+                parent:
+                  type: object
+                  required:
+                    - first_name
+                    - surname
+                    - relationship_to_student
+                    - email
+                    - password
+                    - contact_number
+                  properties:
+                    first_name:
+                      type: string
+                    middle_name:
+                      type: string
+                    surname:
+                      type: string
+                    relationship_to_student:
+                      type: string
+                      example: Mother
+                    email:
+                      type: string
+                      format: email
+                    password:
+                      type: string
+                      format: password
+                      description: 'Min 8 chars, at least one letter and one number'
+                    contact_number:
+                      type: string
+                    address1:
+                      type: string
+                    address2:
+                      type: string
+                    address3:
+                      type: string
+                    city:
+                      type: string
+                    postcode:
+                      type: string
+                    medical_condition:
+                      type: string
+                students:
+                  type: array
+                  minItems: 1
+                  items:
+                    type: object
+                    required:
+                      - first_name
+                      - surname
+                      - class_code
+                    properties:
+                      first_name:
+                        type: string
+                      middle_name:
+                        type: string
+                      surname:
+                        type: string
+                      gender:
+                        type: string
+                        enum:
+                          - male
+                          - female
+                      date_of_birth:
+                        type: string
+                        format: date
+                      class_code:
+                        type: string
+                        description: Must exist within the resolved school
+                      address1:
+                        type: string
+                      address2:
+                        type: string
+                      address3:
+                        type: string
+                      city:
+                        type: string
+                      postcode:
+                        type: string
+                      medical_condition:
+                        type: string
+                guardian_links:
+                  type: array
+                  description: Requests to link as an additional guardian on an existing child, instead of creating a new one
+                  items:
+                    type: object
+                    required:
+                      - guardian_code
+                    properties:
+                      guardian_code:
+                        type: string
+                        description: Must resolve to an existing student within the resolved school
+      responses:
+        '201':
+          description: 'Registration submitted, pending approval'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '400':
+          description: 'Validation failure (missing fields, weak password, unknown school/class code, etc.)'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Email or address already registered
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/ServerError'
+      operationId: postAuthRegisterParent
+  /auth/register-staff:
+    post:
+      tags:
+        - Auth
+      summary: Register a staff member (pending approval)
+      description: Creates the account with role `pending` and `requested_role=staff`. No class assignment — staff onboarding is school-level only.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - user_type
+                - first_name
+                - surname
+                - gender
+                - email
+                - password
+                - phone_number
+                - school_code
+              properties:
+                user_type:
+                  type: string
+                  enum:
+                    - staff
+                first_name:
+                  type: string
+                middle_name:
+                  type: string
+                surname:
+                  type: string
+                gender:
+                  type: string
+                  enum:
+                    - male
+                    - female
+                date_of_birth:
+                  type: string
+                  format: date
+                email:
+                  type: string
+                  format: email
+                password:
+                  type: string
+                  format: password
+                  description: 'Min 8 chars, at least one letter and one number'
+                phone_number:
+                  type: string
+                school_code:
+                  type: string
+                address1:
+                  type: string
+                address2:
+                  type: string
+                address3:
+                  type: string
+                city:
+                  type: string
+                postcode:
+                  type: string
+                medical_condition:
+                  type: string
+                disability:
+                  type: string
+      responses:
+        '201':
+          description: 'Registration submitted, pending approval'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '400':
+          description: Validation failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Email or address already registered
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/ServerError'
+      operationId: postAuthRegisterStaff
+  /auth/login:
+    post:
+      tags:
+        - Auth
+      summary: Log in and receive the session cookie
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - username
+                - password
+              properties:
+                username:
+                  type: string
+                  description: Username or email
+                password:
+                  type: string
+                  format: password
+      responses:
+        '200':
+          description: Logged in — sets the httpOnly `token` cookie
+          headers:
+            Set-Cookie:
+              schema:
+                type: string
+                example: token=eyJ...; HttpOnly; SameSite=Lax
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: Logged in
+                  role:
+                    $ref: '#/components/schemas/RoleName'
+        '400':
+          description: Missing username/password
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Invalid credentials
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+      operationId: postAuthLogin
+  /auth/logout:
+    post:
+      tags:
+        - Auth
+      summary: Log out — revokes the session server-side and clears the cookie
+      description: |-
+        If a valid token cookie is present, bumps that user's
+        `token_version`, which immediately invalidates every token issued
+        for that user (all sessions/devices, not just this one — there is
+        no per-device tracking). Always succeeds and clears the cookie
+        regardless, even if the token was already expired/invalid.
+      security: []
+      responses:
+        '200':
+          description: Logged out
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+      operationId: postAuthLogout
+  /auth/me:
+    get:
+      tags:
+        - Auth
+      summary: Get the current session's user
+      responses:
+        '200':
+          description: The authenticated user
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user:
+                    allOf:
+                      - $ref: '#/components/schemas/JwtUser'
+                      - type: object
+                        properties:
+                          fullName:
+                            type: string
+                            nullable: true
+                            description: 'Derived from staff_details/parents; null for roles with neither (e.g. student, system_admin)'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+      operationId: getAuthMe
+  /auth/change-password:
+    post:
+      tags:
+        - Auth
+      summary: Self-service password change for the logged-in user
+      description: |-
+        Any role. Gated by the `password_management` feature flag, except
+        `system_admin` (platform-wide, administers the flag itself, so it
+        bypasses the check). Verifies `current_password` before setting
+        `new_password` (must satisfy the same strength rule enforced at
+        registration). Bumps `token_version` to log out every other
+        session using the old password, then immediately re-issues a
+        fresh cookie so the caller's own current session keeps working.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - current_password
+                - new_password
+              properties:
+                current_password:
+                  type: string
+                new_password:
+                  type: string
+      responses:
+        '200':
+          $ref: '#/components/responses/MessageOk'
+        '400':
+          description: Missing fields, or new_password does not meet the strength requirement
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Not authenticated, or current_password is incorrect
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Feature disabled for this school
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+      operationId: postAuthChangePassword
+  /admin/classes:
+    get:
+      tags:
+        - Admin
+      summary: List classes
+      description: 'Roles: admin, owner, system_admin. Scoped to the caller''s school unless system_admin.'
+      responses:
+        '200':
+          description: List of classes
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ClassWithSchool'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      operationId: getAdminClasses
+    post:
+      tags:
+        - Admin
+      summary: Create a class
+      description: |-
+        Class codes are always `<school_code>-<suffix>`; only the suffix
+        is submitted here. system_admin must supply `school_id` explicitly
+        (it has none of its own); every other role is scoped to their own
+        school automatically.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - class_name
+                - class_code
+              properties:
+                class_name:
+                  type: string
+                class_code:
+                  type: string
+                  description: 'The suffix only, e.g. 7A'
+                year_group:
+                  type: string
+                description:
+                  type: string
+                school_id:
+                  type: integer
+                  description: Required only for system_admin
+      responses:
+        '200':
+          description: Class created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  class_code:
+                    type: string
+                    description: 'The full generated code, e.g. ILM2026-7A'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: A class with this code already exists for this school
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      operationId: postAdminClasses
+  '/admin/classes/{id}':
+    put:
+      tags:
+        - Admin
+      summary: Update a class
+      parameters:
+        - $ref: '#/components/parameters/ClassId'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - class_name
+                - class_code
+              properties:
+                class_name:
+                  type: string
+                class_code:
+                  type: string
+                year_group:
+                  type: string
+                description:
+                  type: string
+      responses:
+        '200':
+          description: Class updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  class_code:
+                    type: string
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: A class with this code already exists for this school
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      operationId: putAdminClassesById
+    delete:
+      tags:
+        - Admin
+      summary: Delete a class (and its teacher/student assignments)
+      parameters:
+        - $ref: '#/components/parameters/ClassId'
+      responses:
+        '200':
+          $ref: '#/components/responses/MessageOk'
+        '404':
+          $ref: '#/components/responses/NotFound'
+      operationId: deleteAdminClassesById
+  '/admin/classes/{id}/assign-teacher':
+    post:
+      tags:
+        - Admin
+      summary: Assign a teacher to a class
+      parameters:
+        - $ref: '#/components/parameters/ClassId'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - teacherUserId
+              properties:
+                teacherUserId:
+                  type: integer
+      responses:
+        '200':
+          $ref: '#/components/responses/MessageOk'
+        '400':
+          description: 'Missing teacherUserId, or the teacher isn''t in this class''s school'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+      operationId: postAdminClassesByIdAssignTeacher
+  '/admin/classes/{id}/remove-teacher':
+    post:
+      tags:
+        - Admin
+      summary: Unassign a teacher from a class
+      parameters:
+        - $ref: '#/components/parameters/ClassId'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - teacherUserId
+              properties:
+                teacherUserId:
+                  type: integer
+      responses:
+        '200':
+          $ref: '#/components/responses/MessageOk'
+        '400':
+          description: Missing teacherUserId
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+      operationId: postAdminClassesByIdRemoveTeacher
+  '/admin/classes/{id}/assign-student':
+    post:
+      tags:
+        - Admin
+      summary: Assign a student to a class
+      parameters:
+        - $ref: '#/components/parameters/ClassId'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - studentId
+              properties:
+                studentId:
+                  type: integer
+      responses:
+        '200':
+          $ref: '#/components/responses/MessageOk'
+        '400':
+          description: 'Missing studentId, or the student isn''t in this class''s school'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+      operationId: postAdminClassesByIdAssignStudent
+  '/admin/classes/{id}/remove-student':
+    post:
+      tags:
+        - Admin
+      summary: Unassign a student from a class
+      parameters:
+        - $ref: '#/components/parameters/ClassId'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - studentId
+              properties:
+                studentId:
+                  type: integer
+      responses:
+        '200':
+          $ref: '#/components/responses/MessageOk'
+        '400':
+          description: Missing studentId
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+      operationId: postAdminClassesByIdRemoveStudent
+  /admin/teachers:
+    get:
+      tags:
+        - Admin
+      summary: List teachers with their assigned classes
+      responses:
+        '200':
+          description: Teachers with assigned_classes
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id:
+                      type: integer
+                    username:
+                      type: string
+                    email:
+                      type: string
+                    first_name:
+                      type: string
+                      nullable: true
+                    surname:
+                      type: string
+                      nullable: true
+                    assigned_classes:
+                      type: array
+                      items:
+                        type: object
+                        properties:
+                          id:
+                            type: integer
+                          class_name:
+                            type: string
+                          year_group:
+                            type: string
+      operationId: getAdminTeachers
+  '/admin/teachers/{id}':
+    delete:
+      tags:
+        - Admin
+      summary: Delete a teacher account
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          $ref: '#/components/responses/MessageOk'
+        '400':
+          description: Teacher has dependencies that must be removed first
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+      operationId: deleteAdminTeachersById
+  /admin/students-parents:
+    get:
+      tags:
+        - Admin
+      summary: 'Students + their guardians, joined (inner join — drops students with no approved guardian)'
+      description: A student can have more than one guardian (see student_guardians) — each row is one student, with `guardians` as an array of every approved guardian on file.
+      responses:
+        '200':
+          description: Rows
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  description: Flattened student_* fields plus class_id/class_name and a guardians array
+                  properties:
+                    student_id:
+                      type: integer
+                    student_school_id:
+                      type: integer
+                    student_guardian_code:
+                      type: string
+                    class_id:
+                      type: integer
+                    class_name:
+                      type: string
+                    guardians:
+                      type: array
+                      items:
+                        type: object
+                        properties:
+                          parent_id:
+                            type: integer
+                          user_id:
+                            type: integer
+                          first_name:
+                            type: string
+                          surname:
+                            type: string
+                          relationship_to_student:
+                            type: string
+                          contact_number:
+                            type: string
+                          email:
+                            type: string
+      operationId: getAdminStudentsParents
+  /admin/parents:
+    get:
+      tags:
+        - Admin
+      summary: 'All parents, including those with no students left'
+      description: Exists because /students-parents is an inner join and drops a parent whose last child was removed.
+      responses:
+        '200':
+          description: Parents
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    parent_id:
+                      type: integer
+                    parent_user_id:
+                      type: integer
+                    parent_school_id:
+                      type: integer
+                    parent_first_name:
+                      type: string
+                    parent_last_name:
+                      type: string
+                    parent_contact_number:
+                      type: string
+                    parent_email:
+                      type: string
+                    student_count:
+                      type: integer
+                      description: Count of distinct students this parent is an approved guardian of
+      operationId: getAdminParents
+  /admin/assigned-students:
+    get:
+      tags:
+        - Admin
+      summary: 'Students assigned to classes (flat rows, for table display)'
+      responses:
+        '200':
+          description: Rows
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    class_id:
+                      type: integer
+                    class_name:
+                      type: string
+                    student_id:
+                      type: integer
+                    student_first_name:
+                      type: string
+                    student_last_name:
+                      type: string
+      operationId: getAdminAssignedStudents
+  /admin/users-all:
+    get:
+      tags:
+        - Admin
+      summary: All users with full profile details
+      description: 'Roles: owner, maintainer, system_admin. Student users deliberately have no details/children exposed (Option C).'
+      responses:
+        '200':
+          description: Users
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/FullUserDetails'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      operationId: getAdminUsersAll
+  /admin/pending-users:
+    get:
+      tags:
+        - Admin
+      summary: Users awaiting approval
+      responses:
+        '200':
+          description: Pending users
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id:
+                      type: integer
+                    username:
+                      type: string
+                    email:
+                      type: string
+                    requested_role:
+                      type: string
+                    school_name:
+                      type: string
+                    first_name:
+                      type: string
+                      nullable: true
+                    last_name:
+                      type: string
+                      nullable: true
+                    contact_number:
+                      type: string
+                      nullable: true
+      operationId: getAdminPendingUsers
+  '/admin/approve/{id}':
+    post:
+      tags:
+        - Admin
+      summary: Approve a pending user into a role
+      description: |-
+        admin cannot grant owner/maintainer/system_admin. owner cannot
+        grant system_admin. system_admin cannot approve a *parent*
+        registration — that stays with the school's own admin/owner —
+        but can approve staff across any school.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - role
+              properties:
+                role:
+                  type: string
+                  example: teacher
+      responses:
+        '200':
+          $ref: '#/components/responses/MessageOk'
+        '400':
+          description: Missing/invalid role
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: 'Not permitted to grant this role, or system_admin attempting a parent approval'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+      operationId: postAdminApproveById
+  '/admin/reject/{id}':
+    post:
+      tags:
+        - Admin
+      summary: Reject a pending user
+      description: 'Deletes the whole pending submission, including any children submitted with a parent registration.'
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          $ref: '#/components/responses/MessageOk'
+        '403':
+          description: system_admin attempting to reject a parent registration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+      operationId: postAdminRejectById
+  '/admin/users/{id}/reset-password':
+    post:
+      tags:
+        - Admin
+      summary: Reset a locked-out user's password
+      description: |-
+        Roles: admin, owner, system_admin. Gated by the `password_management`
+        feature flag, checked against the target user's school. Same
+        escalation rules as approving a role: admin cannot act on an
+        owner/maintainer/system_admin account; owner cannot act on a
+        system_admin account. Generates a new one-time password server-side
+        and returns it once — this app sends no email, so the caller must
+        relay it to the user out of band. Bumps the target's `token_version`,
+        invalidating any session still using the old password.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Password reset
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  temporaryPassword:
+                    type: string
+        '403':
+          description: Not admin/owner/system_admin, an escalation attempt, or the feature is disabled for this school
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+      operationId: postAdminUsersResetPasswordById
+  '/admin/remove-student/{id}':
+    delete:
+      tags:
+        - Admin
+      summary: Remove a student (and their class assignments)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          $ref: '#/components/responses/MessageOk'
+        '404':
+          $ref: '#/components/responses/NotFound'
+      operationId: deleteAdminRemoveStudentById
+  '/admin/remove-parent/{id}':
+    delete:
+      tags:
+        - Admin
+      summary: Remove a parent (and their login) — only if they have no students left
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          $ref: '#/components/responses/MessageOk'
+        '400':
+          description: Parent still has linked students
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+      operationId: deleteAdminRemoveParentById
+  /admin/guardian-requests:
+    get:
+      tags:
+        - Admin
+      summary: List pending guardian link requests for the caller's school
+      description: Self-service guardian_code requests submitted via POST /parent/link-guardian by an already-approved parent — these have no accompanying user-approval action to ride along with, so they need this dedicated review surface.
+      responses:
+        '200':
+          description: Pending requests
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    student_id:
+                      type: integer
+                    parent_id:
+                      type: integer
+                    requested_at:
+                      type: string
+                      format: date-time
+                    student_first_name:
+                      type: string
+                    student_last_name:
+                      type: string
+                    school_id:
+                      type: integer
+                    parent_first_name:
+                      type: string
+                    parent_last_name:
+                      type: string
+                    parent_email:
+                      type: string
+                    parent_contact_number:
+                      type: string
+      operationId: getAdminGuardianRequests
+  /admin/guardian-requests/approve:
+    post:
+      tags:
+        - Admin
+      summary: Approve a pending guardian link request
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - student_id
+                - parent_id
+              properties:
+                student_id:
+                  type: integer
+                parent_id:
+                  type: integer
+      responses:
+        '200':
+          $ref: '#/components/responses/MessageOk'
+        '400':
+          description: student_id and parent_id are required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Student not found, or no matching pending request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      operationId: postAdminGuardianRequestsApprove
+  /admin/guardian-requests/reject:
+    post:
+      tags:
+        - Admin
+      summary: Reject a pending guardian link request
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - student_id
+                - parent_id
+              properties:
+                student_id:
+                  type: integer
+                parent_id:
+                  type: integer
+      responses:
+        '200':
+          $ref: '#/components/responses/MessageOk'
+        '400':
+          description: student_id and parent_id are required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Student not found, or no matching pending request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      operationId: postAdminGuardianRequestsReject
+  '/admin/students/{studentId}/assign-guardian':
+    post:
+      tags:
+        - Admin
+      summary: Directly link an existing parent as an additional, immediately-approved guardian
+      description: Admin-direct linking — the admin's action is itself the approval, no pending state. Upserts, so this also handles approving a parent who already had a pending self-service request for this student.
+      parameters:
+        - name: studentId
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - parent_id
+              properties:
+                parent_id:
+                  type: integer
+      responses:
+        '200':
+          $ref: '#/components/responses/MessageOk'
+        '400':
+          description: parent_id missing, or the parent belongs to a different school than the student
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+      operationId: postAdminStudentsAssignGuardian
+  '/admin/students/{studentId}/remove-guardian':
+    post:
+      tags:
+        - Admin
+      summary: Remove an approved guardian from a student
+      description: Blocked while it's the student's only approved guardian — a student must always have at least one.
+      parameters:
+        - name: studentId
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - parent_id
+              properties:
+                parent_id:
+                  type: integer
+      responses:
+        '200':
+          $ref: '#/components/responses/MessageOk'
+        '400':
+          description: parent_id missing, or this is the student's only guardian
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+      operationId: postAdminStudentsRemoveGuardian
+  /admin/roles:
+    get:
+      tags:
+        - Admin
+      summary: List roles
+      description: 'Roles: admin, owner, maintainer, system_admin.'
+      responses:
+        '200':
+          description: Roles
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id:
+                      type: integer
+                    name:
+                      type: string
+      operationId: getAdminRoles
+  /admin/roles/add:
+    post:
+      tags:
+        - Admin
+      summary: Add a new role name
+      description: 'Note: this endpoint returns HTTP 200 even on failure — check `success` in the body, not the status code.'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - name
+              properties:
+                name:
+                  type: string
+                  pattern: '^[a-z][a-z0-9_-]{1,49}$'
+      responses:
+        '200':
+          description: Success or failure — see `success`
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  message:
+                    type: string
+      operationId: postAdminRolesAdd
+  '/admin/users/{id}':
+    delete:
+      tags:
+        - Admin
+      summary: Delete a user
+      description: 'Roles: owner, maintainer, system_admin. Owner and system_admin accounts cannot be deleted through this endpoint.'
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          $ref: '#/components/responses/MessageOk'
+        '400':
+          description: User has dependencies that must be removed first
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Target is owner or system_admin
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+      operationId: deleteAdminUsersById
+  '/admin/users/{id}/update-details':
+    put:
+      tags:
+        - Admin
+      summary: Update a user's profile (parent or staff fields)
+      description: 'Roles: owner, maintainer, system_admin. Inserts the profile row if one doesn''t exist yet, otherwise updates it. Also keeps users.email in sync.'
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                first_name:
+                  type: string
+                middle_name:
+                  type: string
+                last_name:
+                  type: string
+                date_of_birth:
+                  type: string
+                  format: date
+                address1:
+                  type: string
+                address2:
+                  type: string
+                address3:
+                  type: string
+                city:
+                  type: string
+                postcode:
+                  type: string
+                medical_condition:
+                  type: string
+                disability:
+                  type: string
+                  description: Staff roles only
+                email:
+                  type: string
+                  format: email
+      responses:
+        '200':
+          $ref: '#/components/responses/MessageOk'
+        '400':
+          description: 'Target user''s role does not support detail editing (e.g. student, pending)'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Email already used by another account
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      operationId: putAdminUsersByIdUpdateDetails
+  /admin/attendance/report:
+    get:
+      tags:
+        - Admin
+      summary: Download an attendance report as CSV
+      description: |-
+        Roles: admin, owner. Gated by the `attendance_report` feature
+        flag. Date range defaults to the last 365 days and cannot exceed
+        that window.
+      parameters:
+        - name: classId
+          in: query
+          schema:
+            type: integer
+          description: Optional — omit for every class in the caller's school
+        - name: startDate
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: endDate
+          in: query
+          schema:
+            type: string
+            format: date
+      responses:
+        '200':
+          description: CSV file
+          content:
+            text/csv:
+              schema:
+                type: string
+        '400':
+          description: Invalid date range
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Feature disabled for this school
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: classId not found / not in the caller's school
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      operationId: getAdminAttendanceReport
+  /admin/analytics:
+    get:
+      tags:
+        - Admin
+      summary: Attendance trend and students-per-class analytics
+      description: |-
+        Roles: admin, owner. Gated by the `analytics_dashboard` feature
+        flag. The attendance trend covers either the school's current term
+        (`range=term`, the default — the `school_terms` row whose date
+        range contains today, or the last 30 days if no current term
+        exists) or a trailing 365-day window (`range=year` — this schema
+        has no academic-year concept, so "year" means the last 365 days,
+        not a calendar/school year). Days with no attendance records taken
+        are omitted from `points` entirely — not backfilled as a rate of 0.
+        `feesTrend` is a separate chart gated by its own `fees` feature
+        flag (independent of `analytics_dashboard`) — null when that flag
+        is off for the school. It's collected vs outstanding amounts either
+        per fee period (`feesRange=month`, the default) or summed by
+        calendar year of the period's start date (`feesRange=year`).
+      parameters:
+        - name: range
+          in: query
+          schema:
+            type: string
+            enum:
+              - term
+              - year
+            default: term
+        - name: feesRange
+          in: query
+          schema:
+            type: string
+            enum:
+              - month
+              - year
+            default: month
+      responses:
+        '200':
+          description: Analytics data
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  attendanceTrend:
+                    type: object
+                    properties:
+                      range:
+                        type: string
+                        enum:
+                          - term
+                          - year
+                      rangeStart:
+                        type: string
+                        format: date
+                      rangeEnd:
+                        type: string
+                        format: date
+                      termName:
+                        type: string
+                        nullable: true
+                        description: Null when range=year, or range=term with no current term (30-day fallback)
+                      points:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            date:
+                              type: string
+                              format: date
+                            rate:
+                              type: number
+                              nullable: true
+                              description: Fraction present (0-1); null if the day has no attendance records
+                  studentsPerClass:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        classId:
+                          type: integer
+                        className:
+                          type: string
+                        studentCount:
+                          type: integer
+                  feesTrend:
+                    type: object
+                    nullable: true
+                    description: Null when the `fees` feature flag is disabled for this school
+                    properties:
+                      range:
+                        type: string
+                        enum:
+                          - month
+                          - year
+                      points:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            label:
+                              type: string
+                              description: Fee period name (feesRange=month) or calendar year (feesRange=year)
+                            collected:
+                              type: number
+                              description: Sum of paid fee amounts
+                            outstanding:
+                              type: number
+                              description: Sum of unpaid fee amounts
+        '400':
+          description: Invalid range or feesRange value
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Feature disabled for this school
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      operationId: getAdminAnalytics
+  /admin/students/bulk-upload:
+    post:
+      tags:
+        - Admin
+      summary: Bulk-create students (and their parents) from CSV rows parsed client-side
+      description: |-
+        Role: admin only — deliberately narrower than every other Admin
+        endpoint (owner and system_admin are rejected). The client parses
+        the CSV and posts the rows as JSON; there is no server-side file
+        upload. Each row either links an existing parent (matched by
+        `parent_email` within the caller's school) as an additional
+        guardian, or creates a brand-new parent account — this app has no
+        password-reset/email flow, so a newly-created parent's one-time
+        password is generated server-side and returned in that row's
+        result for the admin to relay out of band; it is never stored
+        anywhere but its hash. Each row is processed in its own
+        transaction, so one bad row does not affect the others. Max 500
+        rows per request.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - rows
+              properties:
+                rows:
+                  type: array
+                  maxItems: 500
+                  items:
+                    type: object
+                    required:
+                      - student_first_name
+                      - student_surname
+                      - student_gender
+                      - student_date_of_birth
+                      - class_code
+                      - parent_first_name
+                      - parent_surname
+                      - parent_relationship_to_student
+                      - parent_contact_number
+                      - parent_email
+                    properties:
+                      student_first_name:
+                        type: string
+                      student_middle_name:
+                        type: string
+                      student_surname:
+                        type: string
+                      student_gender:
+                        type: string
+                      student_date_of_birth:
+                        type: string
+                        format: date
+                      student_address1:
+                        type: string
+                      student_address2:
+                        type: string
+                      student_address3:
+                        type: string
+                      student_city:
+                        type: string
+                      student_postcode:
+                        type: string
+                      student_medical_condition:
+                        type: string
+                      class_code:
+                        type: string
+                        description: Must exist within the caller's school
+                      parent_first_name:
+                        type: string
+                      parent_middle_name:
+                        type: string
+                      parent_surname:
+                        type: string
+                      parent_relationship_to_student:
+                        type: string
+                      parent_date_of_birth:
+                        type: string
+                        format: date
+                      parent_address1:
+                        type: string
+                      parent_address2:
+                        type: string
+                      parent_address3:
+                        type: string
+                      parent_city:
+                        type: string
+                      parent_postcode:
+                        type: string
+                      parent_medical_condition:
+                        type: string
+                      parent_contact_number:
+                        type: string
+                      parent_email:
+                        type: string
+                        format: email
+      responses:
+        '200':
+          description: Per-row results (a row can fail without the whole request erroring)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  summary:
+                    type: object
+                    properties:
+                      total:
+                        type: integer
+                      succeeded:
+                        type: integer
+                      failed:
+                        type: integer
+                  results:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        row:
+                          type: integer
+                          description: 1-indexed position in the submitted rows array
+                        status:
+                          type: string
+                          enum:
+                            - created
+                            - error
+                        message:
+                          type: string
+                        studentId:
+                          type: integer
+                        parentCreated:
+                          type: boolean
+                          description: True if a brand-new parent account was created for this row
+                        temporaryPassword:
+                          type: string
+                          description: Only present when parentCreated is true — relay to the parent out of band, shown once
+        '400':
+          description: No rows submitted, or more than 500 rows
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      operationId: postAdminStudentsBulkUpload
+  /parent/children:
+    get:
+      tags:
+        - Parent
+      summary: List the logged-in parent's children
+      responses:
+        '200':
+          description: Children
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  children:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ChildSummary'
+      operationId: getParentChildren
+  /parent/add-child:
+    post:
+      tags:
+        - Parent
+      summary: Add a child to the logged-in parent's account and enroll them in a class
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - first_name
+                - surname
+                - gender
+                - date_of_birth
+                - class_code
+              properties:
+                first_name:
+                  type: string
+                middle_name:
+                  type: string
+                surname:
+                  type: string
+                gender:
+                  type: string
+                  enum:
+                    - male
+                    - female
+                date_of_birth:
+                  type: string
+                  format: date
+                class_code:
+                  type: string
+                  description: Must exist within the parent's own school
+                address1:
+                  type: string
+                address2:
+                  type: string
+                address3:
+                  type: string
+                city:
+                  type: string
+                postcode:
+                  type: string
+                medical_condition:
+                  type: string
+      responses:
+        '200':
+          description: Child added
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  children:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ChildSummary'
+        '400':
+          description: 'Missing required fields, or invalid class code'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      operationId: postParentAddChild
+  /parent/link-guardian:
+    post:
+      tags:
+        - Parent
+      summary: Self-service request to link as an additional guardian on an existing child
+      description: For an already-approved, logged-in parent linking to a child that isn't theirs yet (e.g. added later, not at initial registration). Always inserted `pending` — there's no accompanying user-approval action for this to ride along with, so it always needs an explicit admin decision via GET/POST /admin/guardian-requests.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - guardian_code
+              properties:
+                guardian_code:
+                  type: string
+      responses:
+        '201':
+          description: 'Request submitted, pending admin approval'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '400':
+          description: Parent not found, or guardian_code missing
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Invalid guardian code
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Already linked, or a request is already pending
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      operationId: postParentLinkGuardian
+  /parent/tasks:
+    get:
+      tags:
+        - Parent
+      summary: List tasks/homework for all of the parent's children
+      responses:
+        '200':
+          description: Tasks
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tasks:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/TaskWithChildName'
+      operationId: getParentTasks
+  /parent/schedule:
+    get:
+      tags:
+        - Parent
+      summary: Class schedule for all of the parent's children, grouped by child
+      description: Gated by `timetable`. Each child's slots come from whichever class(es) they're enrolled in via `student_classes`; a child with no enrolled class or no slots simply won't appear.
+      responses:
+        '200':
+          description: Schedule, grouped by child
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  schedule:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        student_id:
+                          type: integer
+                        child_name:
+                          type: string
+                        slots:
+                          type: array
+                          items:
+                            type: object
+                            properties:
+                              slot_date:
+                                type: string
+                                format: date
+                              start_time:
+                                type: string
+                              end_time:
+                                type: string
+                              class_name:
+                                type: string
+                              subject_name:
+                                type: string
+                                nullable: true
+                              teacher_first_name:
+                                type: string
+                              teacher_surname:
+                                type: string
+        '403':
+          description: The timetable feature is disabled for this school
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      operationId: getParentSchedule
+  /teacher/classes:
+    get:
+      tags:
+        - Teacher
+      summary: List the logged-in teacher's classes
+      responses:
+        '200':
+          description: Classes
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  classes:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Class'
+      operationId: getTeacherClasses
+  /teacher/attendance/report:
+    get:
+      tags:
+        - Teacher
+      summary: Download an attendance report (CSV) for one of the teacher's own classes
+      description: Gated by `attendance_report`. Always the last 365 days — no custom range.
+      parameters:
+        - name: classId
+          in: query
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: CSV file
+          content:
+            text/csv:
+              schema:
+                type: string
+        '400':
+          description: classId is required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: 'Feature disabled, or teacher not assigned to this class'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      operationId: getTeacherAttendanceReport
+  '/teacher/attendance/{classId}':
+    get:
+      tags:
+        - Teacher
+      summary: Get the attendance register for a class on a given date
+      parameters:
+        - name: classId
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: date
+          in: query
+          schema:
+            type: string
+            format: date
+          description: Defaults to today
+      responses:
+        '200':
+          description: Register
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  date:
+                    type: string
+                    format: date
+                  students:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: integer
+                        first_name:
+                          type: string
+                        surname:
+                          type: string
+                        attendance_status:
+                          type: string
+                          enum:
+                            - PRESENT
+                            - ABSENT
+                          nullable: true
+                          description: null if not yet marked for this date
+        '400':
+          description: Invalid date format
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Teacher not assigned to this class
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      operationId: getTeacherAttendanceByClassId
+  '/teacher/attendance/{classId}/history':
+    get:
+      tags:
+        - Teacher
+      summary: Get daily attendance summary counts for a class
+      parameters:
+        - name: classId
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: History
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  history:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        date:
+                          type: string
+                          format: date
+                        present_count:
+                          type: integer
+                        absent_count:
+                          type: integer
+                        total_count:
+                          type: integer
+        '403':
+          description: Teacher not assigned to this class
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      operationId: getTeacherAttendanceByClassIdHistory
+  /teacher/attendance/mark:
+    post:
+      tags:
+        - Teacher
+      summary: Mark one student's attendance for a class/date
+      description: Upsert — repeated calls for the same class/student/date overwrite the status.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - classId
+                - studentId
+                - status
+              properties:
+                classId:
+                  type: integer
+                studentId:
+                  type: integer
+                status:
+                  type: string
+                  enum:
+                    - present
+                    - absent
+                    - PRESENT
+                    - ABSENT
+                  description: Case-insensitive
+                date:
+                  type: string
+                  format: date
+                  description: Defaults to today
+      responses:
+        '200':
+          description: Marked
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  date:
+                    type: string
+                    format: date
+        '400':
+          description: 'Missing fields, or invalid status/date'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Teacher not assigned to this class
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      operationId: postTeacherAttendanceMark
+  /teacher/tasks/create:
+    post:
+      tags:
+        - Teacher
+      summary: 'Create a task for a class, or independent homework for one student'
+      description: |-
+        Pass `studentId` to target one student instead of the whole class
+        ("independent homework") — this is gated by the `student_notes`
+        flag since it lives on the same UI panel as student notes.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - classId
+                - title
+              properties:
+                classId:
+                  type: integer
+                title:
+                  type: string
+                description:
+                  type: string
+                due_date:
+                  type: string
+                  format: date
+                studentId:
+                  type: integer
+                  description: Optional — targets one student in the class instead of the whole class
+      responses:
+        '200':
+          $ref: '#/components/responses/MessageOk'
+        '400':
+          description: studentId given but that student isn't in this class
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: 'Teacher not assigned to this class, or independent homework disabled'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      operationId: postTeacherTasksCreate
+  '/teacher/tasks/{id}':
+    delete:
+      tags:
+        - Teacher
+      summary: Delete a task
+      description: Only permitted for a task belonging to one of the teacher's own classes.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          $ref: '#/components/responses/MessageOk'
+        '403':
+          description: Teacher not assigned to this task's class
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      operationId: deleteTeacherTasksById
+  /teacher/tasks:
+    get:
+      tags:
+        - Teacher
+      summary: List tasks across all of the teacher's classes
+      responses:
+        '200':
+          description: Tasks
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tasks:
+                    type: array
+                    items:
+                      allOf:
+                        - $ref: '#/components/schemas/Task'
+                        - type: object
+                          properties:
+                            class_name:
+                              type: string
+                            student_name:
+                              type: string
+                              nullable: true
+                              description: Set only for independent homework
+      operationId: getTeacherTasks
+  /student/classes:
+    get:
+      tags:
+        - Student
+      summary: List the logged-in student's classes
+      responses:
+        '200':
+          description: Classes
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  classes:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Class'
+      operationId: getStudentClasses
+  /student/tasks:
+    get:
+      tags:
+        - Student
+      summary: List tasks assigned to the student (class-wide + their own independent homework)
+      responses:
+        '200':
+          description: Tasks
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tasks:
+                    type: array
+                    items:
+                      allOf:
+                        - $ref: '#/components/schemas/Task'
+                        - type: object
+                          properties:
+                            class_name:
+                              type: string
+                            is_independent:
+                              type: boolean
+      operationId: getStudentTasks
+  /system-admin/schools:
+    get:
+      tags:
+        - System Admin
+      summary: List schools
+      responses:
+        '200':
+          description: Schools
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/School'
+      operationId: getSystemAdminSchools
+    post:
+      tags:
+        - System Admin
+      summary: Create a school (auto-generates a unique school_code)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - name
+              properties:
+                name:
+                  type: string
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  school_code:
+                    type: string
+                    example: ABCD2345
+        '400':
+          description: Name is required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Could not generate a unique code after 10 attempts (astronomically unlikely)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      operationId: postSystemAdminSchools
+  /system-admin/feature-flags:
+    get:
+      tags:
+        - System Admin
+      summary: 'List the feature flag catalog, every school, and existing per-school overrides'
+      description: 'Effective state for a school = its override if one exists, else the flag''s default_enabled.'
+      responses:
+        '200':
+          description: Catalog
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  flags:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/FeatureFlag'
+                  schools:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/School'
+                  overrides:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        school_id:
+                          type: integer
+                        feature_flag_id:
+                          type: integer
+                        enabled:
+                          type: boolean
+      operationId: getSystemAdminFeatureFlags
+    post:
+      tags:
+        - System Admin
+      summary: Create a feature flag
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - feature_key
+                - name
+              properties:
+                feature_key:
+                  type: string
+                  pattern: '^[a-z][a-z0-9_]{1,79}$'
+                name:
+                  type: string
+                description:
+                  type: string
+                default_enabled:
+                  type: boolean
+                  default: false
+                expires_at:
+                  type: string
+                  format: date-time
+                  description: 'After this time, the flag reverts to disabled everywhere (see utils/featureFlags.ts)'
+      responses:
+        '200':
+          $ref: '#/components/responses/MessageOk'
+        '400':
+          description: Invalid key/name/expiry format
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: A flag with this key already exists
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      operationId: postSystemAdminFeatureFlags
+  /system-admin/feature-flags/audit-log:
+    get:
+      tags:
+        - System Admin
+      summary: Recent feature-flag activity — who created/updated/deleted a flag or set/cleared a per-school override, and when
+      description: Newest first, capped at 200 rows. An activity feed, not a paginated report.
+      responses:
+        '200':
+          description: Recent audit log entries
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/FeatureFlagAuditLogEntry'
+      operationId: getSystemAdminFeatureFlagsAuditLog
+  '/system-admin/feature-flags/{id}':
+    put:
+      tags:
+        - System Admin
+      summary: Update a feature flag's metadata
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - name
+              properties:
+                name:
+                  type: string
+                description:
+                  type: string
+                default_enabled:
+                  type: boolean
+                expires_at:
+                  type: string
+                  format: date-time
+      responses:
+        '200':
+          $ref: '#/components/responses/MessageOk'
+        '400':
+          description: Invalid name/expiry format
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+      operationId: putSystemAdminFeatureFlagsById
+    delete:
+      tags:
+        - System Admin
+      summary: Delete a feature flag
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          $ref: '#/components/responses/MessageOk'
+        '404':
+          $ref: '#/components/responses/NotFound'
+      operationId: deleteSystemAdminFeatureFlagsById
+  '/system-admin/feature-flags/{id}/schools/{schoolId}':
+    put:
+      tags:
+        - System Admin
+      summary: Set a per-school override for a feature flag
+      description: This is the only way a flag actually turns on/off for a school.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: schoolId
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - enabled
+              properties:
+                enabled:
+                  type: boolean
+      responses:
+        '200':
+          $ref: '#/components/responses/MessageOk'
+        '400':
+          description: enabled must be a boolean
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Feature or school not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      operationId: putSystemAdminFeatureFlagsByIdSchoolsBySchoolId
+    delete:
+      tags:
+        - System Admin
+      summary: Clear a per-school override (revert that school to the flag's default)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: schoolId
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          $ref: '#/components/responses/MessageOk'
+      operationId: deleteSystemAdminFeatureFlagsByIdSchoolsBySchoolId
+  /features:
+    get:
+      tags:
+        - Features
+      summary: Effective feature-flag state for the caller's own school
+      description: Used by dashboards to decide what flag-gated UI to show.
+      responses:
+        '200':
+          description: Flags
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  flags:
+                    type: object
+                    additionalProperties:
+                      type: boolean
+                    example:
+                      attendance_report: true
+                      notifications: true
+                      student_notes: false
+      operationId: getFeatures
+  /notifications:
+    post:
+      tags:
+        - Notifications
+      summary: Send a notification to every parent or every staff member at a school
+      description: 'Roles: admin, owner, system_admin. Gated by the `notifications` flag. system_admin must supply school_id explicitly.'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - audience
+                - title
+                - message
+              properties:
+                audience:
+                  type: string
+                  enum:
+                    - parent
+                    - staff
+                title:
+                  type: string
+                message:
+                  type: string
+                school_id:
+                  type: integer
+                  description: Required only for system_admin
+      responses:
+        '201':
+          description: Sent
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  recipientCount:
+                    type: integer
+        '400':
+          description: 'Missing/invalid audience, title, message, or school'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Feature disabled for this school
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      operationId: postNotifications
+    get:
+      tags:
+        - Notifications
+      summary: List notifications addressed to the logged-in user
+      description: Returns an empty array (not an error) if the `notifications` flag is off for the caller's school.
+      responses:
+        '200':
+          description: Inbox
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/NotificationInbox'
+      operationId: getNotifications
+  /notifications/sent:
+    get:
+      tags:
+        - Notifications
+      summary: List notifications the caller (or their school) has sent
+      description: 'Roles: admin, owner, system_admin.'
+      responses:
+        '200':
+          description: Sent notifications
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  allOf:
+                    - $ref: '#/components/schemas/Notification'
+                    - type: object
+                      properties:
+                        school_name:
+                          type: string
+                        sender_first_name:
+                          type: string
+                        sender_last_name:
+                          type: string
+                        recipient_count:
+                          type: integer
+      operationId: getNotificationsSent
+  '/notifications/{id}/read':
+    post:
+      tags:
+        - Notifications
+      summary: Mark a notification as read for the logged-in user
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          $ref: '#/components/responses/MessageOk'
+        '403':
+          description: Feature disabled for this school
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Not addressed to this user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      operationId: postNotificationsByIdRead
+  '/notes/students/{studentId}':
+    get:
+      tags:
+        - Notes
+      summary: Get private notes for a student
+      description: |-
+        Gated by `student_notes`. Visible to staff at the student's school
+        (teacher/staff/admin/owner/maintainer) or that student's own
+        parent — never the student themselves.
+      parameters:
+        - name: studentId
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Notes
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  notes:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: integer
+                        note:
+                          type: string
+                        created_at:
+                          type: string
+                          format: date-time
+                        author_first_name:
+                          type: string
+                        author_last_name:
+                          type: string
+        '403':
+          description: 'Feature disabled, or caller doesn''t have access to this student'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Student not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      operationId: getNotesStudentsByStudentId
+    post:
+      tags:
+        - Notes
+      summary: Add a private note for a student
+      description: Staff only. A teacher is further restricted to students in one of their own classes.
+      parameters:
+        - name: studentId
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - note
+              properties:
+                note:
+                  type: string
+      responses:
+        '201':
+          $ref: '#/components/responses/MessageOk'
+        '400':
+          description: Note text is required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: 'Not staff, feature disabled, wrong school, or (teacher) not assigned to this student''s class'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Student not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      operationId: postNotesStudentsByStudentId
+  /report-cards/terms:
+    get:
+      tags:
+        - Report Cards
+      summary: List school terms
+      description: Admin and teacher only. Teachers use this to pick a term when creating a report card; admin also manages the term catalog.
+      responses:
+        '200':
+          description: Terms
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  terms:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: integer
+                        name:
+                          type: string
+                        start_date:
+                          type: string
+                          format: date
+                        end_date:
+                          type: string
+                          format: date
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      operationId: getReportCardsTerms
+    post:
+      tags:
+        - Report Cards
+      summary: Create a school term
+      description: Admin only.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - name
+                - start_date
+                - end_date
+              properties:
+                name:
+                  type: string
+                start_date:
+                  type: string
+                  format: date
+                end_date:
+                  type: string
+                  format: date
+      responses:
+        '201':
+          description: Term created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  term:
+                    type: object
+                    properties:
+                      id:
+                        type: integer
+                      name:
+                        type: string
+                      start_date:
+                        type: string
+                        format: date
+                      end_date:
+                        type: string
+                        format: date
+        '400':
+          description: Missing name/dates, or end_date before start_date
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: A term with this name already exists for the school
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      operationId: postReportCardsTerms
+  '/report-cards/students/{studentId}':
+    get:
+      tags:
+        - Report Cards
+      summary: List a student's report cards
+      description: |-
+        Gated by `report_cards`. Visible to admin/teacher at the student's
+        school (a teacher only if they teach the student) or that student's
+        own parent — never the student themselves. Each report card includes
+        its nested per-subject grades.
+      parameters:
+        - name: studentId
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Report cards
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  reportCards:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: integer
+                        term_id:
+                          type: integer
+                        term_name:
+                          type: string
+                        term_start_date:
+                          type: string
+                          format: date
+                        term_end_date:
+                          type: string
+                          format: date
+                        created_at:
+                          type: string
+                          format: date-time
+                        updated_at:
+                          type: string
+                          format: date-time
+                        subjects:
+                          type: array
+                          items:
+                            type: object
+                            properties:
+                              id:
+                                type: integer
+                              subject_name:
+                                type: string
+                              grade:
+                                type: string
+                              comment:
+                                type: string
+                                nullable: true
+        '403':
+          description: 'Feature disabled, or caller doesn''t have access to this student'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Student not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      operationId: getReportCardsStudentsByStudentId
+    post:
+      tags:
+        - Report Cards
+      summary: Create a report card for a student
+      description: |-
+        Admin, or a teacher who teaches this student. One report card per
+        student per term — use `PUT /report-cards/{id}` to edit an
+        existing one instead.
+      parameters:
+        - name: studentId
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - term_id
+                - subjects
+              properties:
+                term_id:
+                  type: integer
+                subjects:
+                  type: array
+                  items:
+                    type: object
+                    required:
+                      - subject_name
+                      - grade
+                    properties:
+                      subject_name:
+                        type: string
+                      grade:
+                        type: string
+                      comment:
+                        type: string
+      responses:
+        '201':
+          description: Report card created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  reportCard:
+                    type: object
+                    properties:
+                      id:
+                        type: integer
+        '400':
+          description: Missing term_id/subjects, an invalid subject, or an unknown term for this school
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: 'Not admin/teacher, feature disabled, wrong school, or (teacher) not assigned to this student''s class'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Student not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: A report card already exists for this student and term
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      operationId: postReportCardsStudentsByStudentId
+  '/report-cards/{id}':
+    put:
+      tags:
+        - Report Cards
+      summary: Replace a report card's subjects
+      description: Admin, or a teacher who teaches the student this report card belongs to. Replaces the full subject list rather than patching individual rows.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - subjects
+              properties:
+                subjects:
+                  type: array
+                  items:
+                    type: object
+                    required:
+                      - subject_name
+                      - grade
+                    properties:
+                      subject_name:
+                        type: string
+                      grade:
+                        type: string
+                      comment:
+                        type: string
+      responses:
+        '200':
+          $ref: '#/components/responses/MessageOk'
+        '400':
+          description: Missing/invalid subjects
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: 'Not admin/teacher, feature disabled, or (teacher) no longer assigned to this student''s class'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Report card not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      operationId: putReportCardsById
+    delete:
+      tags:
+        - Report Cards
+      summary: Delete a report card
+      description: Admin, or a teacher who teaches the student this report card belongs to.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          $ref: '#/components/responses/MessageOk'
+        '403':
+          description: 'Not admin/teacher, feature disabled, or (teacher) no longer assigned to this student''s class'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Report card not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      operationId: deleteReportCardsById
+  /timetable/terms:
+    get:
+      tags:
+        - Timetable
+      summary: List school terms (admin/owner/parent view)
+      description: Admin, owner, and parent. Same underlying `school_terms` table as `GET /report-cards/terms`, but its own role gate — report cards deliberately excludes owner, timetable deliberately includes it and also allows parents read access to term dates. Not gated by `timetable`, so the year view can be built before any slots exist.
+      responses:
+        '200':
+          description: Terms
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  terms:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: integer
+                        name:
+                          type: string
+                        start_date:
+                          type: string
+                          format: date
+                        end_date:
+                          type: string
+                          format: date
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      operationId: getTimetableTerms
+    post:
+      tags:
+        - Timetable
+      summary: Create a school term (admin/owner)
+      description: Admin and owner only.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - name
+                - start_date
+                - end_date
+              properties:
+                name:
+                  type: string
+                start_date:
+                  type: string
+                  format: date
+                end_date:
+                  type: string
+                  format: date
+      responses:
+        '201':
+          description: Term created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  term:
+                    type: object
+                    properties:
+                      id:
+                        type: integer
+                      name:
+                        type: string
+                      start_date:
+                        type: string
+                        format: date
+                      end_date:
+                        type: string
+                        format: date
+        '400':
+          description: Missing name/dates, or end_date before start_date
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: A term with this name already exists for the school
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      operationId: postTimetableTerms
+  /timetable/slots:
+    get:
+      tags:
+        - Timetable
+      summary: List every class's timetable slots for one term (school-wide calendar view)
+      description: Admin and owner only. Gated by `timetable`. Powers the weekly grid view — every class's slots at once for a given term, unlike `GET /timetable/classes/{classId}/slots` which is scoped to one class.
+      parameters:
+        - name: term_id
+          in: query
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Slots
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  slots:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: integer
+                        class_id:
+                          type: integer
+                        class_name:
+                          type: string
+                        term_id:
+                          type: integer
+                        slot_date:
+                          type: string
+                          format: date
+                        start_time:
+                          type: string
+                        end_time:
+                          type: string
+                        subject_name:
+                          type: string
+                        teacher_id:
+                          type: integer
+                          nullable: true
+                        teacher_first_name:
+                          type: string
+                        teacher_surname:
+                          type: string
+        '400':
+          description: term_id missing, or doesn't belong to this school
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      operationId: getTimetableSlots
+  '/timetable/classes/{classId}/slots':
+    get:
+      tags:
+        - Timetable
+      summary: List a class's timetable slots
+      description: Admin and owner only. Gated by `timetable`. term_id is optional — omit it to see every slot for this class across every term.
+      parameters:
+        - name: classId
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: term_id
+          in: query
+          required: false
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Slots
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  slots:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: integer
+                        term_id:
+                          type: integer
+                        term_name:
+                          type: string
+                        slot_date:
+                          type: string
+                          format: date
+                        start_time:
+                          type: string
+                        end_time:
+                          type: string
+                        subject_name:
+                          type: string
+                          nullable: true
+                        teacher_id:
+                          type: integer
+                          nullable: true
+                        teacher_first_name:
+                          type: string
+                        teacher_surname:
+                          type: string
+        '400':
+          description: term_id was provided but doesn't belong to this school
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: 'Not admin/owner, feature disabled, or class at a different school'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Class not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      operationId: getTimetableClassesSlotsByClassId
+    post:
+      tags:
+        - Timetable
+      summary: Create a timetable slot for a class
+      description: |-
+        Admin and owner only. Gated by `timetable`. There's no term_id to
+        set — it's resolved automatically from slot_date (whichever term's
+        date range contains it). 400s if no term at this school covers
+        that date. One slot per class/date/start_time.
+      parameters:
+        - name: classId
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - slot_date
+                - start_time
+                - end_time
+              properties:
+                slot_date:
+                  type: string
+                  format: date
+                start_time:
+                  type: string
+                  description: 'HH:MM'
+                end_time:
+                  type: string
+                  description: 'HH:MM'
+                subject_name:
+                  type: string
+                teacher_id:
+                  type: integer
+                  nullable: true
+      responses:
+        '201':
+          description: Slot created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  slot:
+                    type: object
+                    properties:
+                      id:
+                        type: integer
+                      term_id:
+                        type: integer
+        '400':
+          description: Invalid date/time, no term at this school covers slot_date, or teacher_id isn't a teacher at this school
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: 'Not admin/owner, feature disabled, or class at a different school'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Class not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: A slot already exists for this class at this date and start time
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      operationId: postTimetableClassesSlotsByClassId
+  '/timetable/slots/{id}':
+    put:
+      tags:
+        - Timetable
+      summary: Edit a timetable slot
+      description: Admin and owner only. Gated by `timetable`. No term_id — moving slot_date re-resolves which term the slot belongs to, the same way creation does.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - slot_date
+                - start_time
+                - end_time
+              properties:
+                slot_date:
+                  type: string
+                  format: date
+                start_time:
+                  type: string
+                end_time:
+                  type: string
+                subject_name:
+                  type: string
+                teacher_id:
+                  type: integer
+                  nullable: true
+      responses:
+        '200':
+          $ref: '#/components/responses/MessageOk'
+        '400':
+          description: Invalid date/time, no term at this school covers the new slot_date, or teacher_id isn't a teacher at this school
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: 'Not admin/owner, feature disabled, or slot''s class at a different school'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Slot not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: A slot already exists for this class at this date and start time
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      operationId: putTimetableSlotsById
+    delete:
+      tags:
+        - Timetable
+      summary: Delete a timetable slot
+      description: Admin and owner only. Gated by `timetable`.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          $ref: '#/components/responses/MessageOk'
+        '403':
+          description: 'Not admin/owner, feature disabled, or slot''s class at a different school'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Slot not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      operationId: deleteTimetableSlotsById
+  /timetable/events:
+    get:
+      tags:
+        - Timetable
+      summary: List the caller's school events
+      description: Admin and owner only. Not gated by `timetable` (like `GET /report-cards/terms`, this is scaffolding data admin/owner can manage before turning the flag on) — every write below is gated.
+      responses:
+        '200':
+          description: Events
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  events:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: integer
+                        title:
+                          type: string
+                        description:
+                          type: string
+                          nullable: true
+                        event_date:
+                          type: string
+                          format: date
+                        start_time:
+                          type: string
+                          nullable: true
+                        end_time:
+                          type: string
+                          nullable: true
+                        created_at:
+                          type: string
+                          format: date-time
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      operationId: getTimetableEvents
+    post:
+      tags:
+        - Timetable
+      summary: Create a school event
+      description: Admin and owner only. Gated by `timetable`. start_time/end_time are optional (all-day event).
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - title
+                - event_date
+              properties:
+                title:
+                  type: string
+                description:
+                  type: string
+                event_date:
+                  type: string
+                  format: date
+                start_time:
+                  type: string
+                  description: 'HH:MM'
+                end_time:
+                  type: string
+                  description: 'HH:MM'
+      responses:
+        '201':
+          description: Event created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  event:
+                    type: object
+                    properties:
+                      id:
+                        type: integer
+        '400':
+          description: Missing title/event_date, or invalid/inconsistent times
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      operationId: postTimetableEvents
+  '/timetable/events/{id}':
+    put:
+      tags:
+        - Timetable
+      summary: Edit a school event
+      description: Admin and owner only. Gated by `timetable`.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - title
+                - event_date
+              properties:
+                title:
+                  type: string
+                description:
+                  type: string
+                event_date:
+                  type: string
+                  format: date
+                start_time:
+                  type: string
+                end_time:
+                  type: string
+      responses:
+        '200':
+          $ref: '#/components/responses/MessageOk'
+        '400':
+          description: Missing title/event_date, or invalid/inconsistent times
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: 'Not admin/owner, feature disabled, or event at a different school'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Event not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      operationId: putTimetableEventsById
+    delete:
+      tags:
+        - Timetable
+      summary: Delete a school event
+      description: Admin and owner only. Gated by `timetable`.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          $ref: '#/components/responses/MessageOk'
+        '403':
+          description: 'Not admin/owner, feature disabled, or event at a different school'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Event not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      operationId: deleteTimetableEventsById
+  /fees/fee-periods:
+    get:
+      tags:
+        - Fees
+      summary: List fee periods
+      description: Admin and treasurer only. Gated by `fees`.
+      responses:
+        '200':
+          description: Fee periods
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  feePeriods:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: integer
+                        name:
+                          type: string
+                        start_date:
+                          type: string
+                          format: date
+                        end_date:
+                          type: string
+                          format: date
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      operationId: getFeesFeePeriods
+    post:
+      tags:
+        - Fees
+      summary: Create a fee period
+      description: Admin and treasurer only. Gated by `fees`.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - name
+                - start_date
+                - end_date
+              properties:
+                name:
+                  type: string
+                start_date:
+                  type: string
+                  format: date
+                end_date:
+                  type: string
+                  format: date
+      responses:
+        '201':
+          description: Fee period created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  feePeriod:
+                    type: object
+                    properties:
+                      id:
+                        type: integer
+                      name:
+                        type: string
+                      start_date:
+                        type: string
+                        format: date
+                      end_date:
+                        type: string
+                        format: date
+        '400':
+          description: Missing name/dates, or end_date before start_date
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: A fee period with this name already exists for the school
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      operationId: postFeesFeePeriods
+  /fees/classes:
+    get:
+      tags:
+        - Fees
+      summary: List the caller's school classes
+      description: |-
+        Admin and treasurer only. Gated by `fees`. Minimal — just `id` and
+        `class_name` — for building the per-class amount form on
+        `POST /fees/fee-periods/{id}/generate`. Deliberately separate from
+        `GET /admin/classes`, which is gated by admin/owner/system_admin
+        and doesn't include treasurer.
+      responses:
+        '200':
+          description: The school's classes
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  classes:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: integer
+                        class_name:
+                          type: string
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      operationId: getFeesClasses
+  '/fees/fee-periods/{id}/fees':
+    get:
+      tags:
+        - Fees
+      summary: List every student's fee row for a period
+      description: |-
+        Admin and treasurer only. Gated by `fees`. Every student at the
+        school is returned even if this period hasn't been generated for
+        them yet (fee_id/amount/status/paid_at come back null in that case).
+        `class_name` is a comma-separated list, not a single class — a
+        student can belong to more than one class (e.g. a form class plus
+        an after-school club).
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Fee period and per-student fee rows
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  feePeriod:
+                    type: object
+                    properties:
+                      id:
+                        type: integer
+                      name:
+                        type: string
+                  fees:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        student_id:
+                          type: integer
+                        student_first_name:
+                          type: string
+                        student_surname:
+                          type: string
+                        class_name:
+                          type: string
+                          nullable: true
+                        fee_id:
+                          type: integer
+                          nullable: true
+                        amount:
+                          type: number
+                          nullable: true
+                        status:
+                          type: string
+                          enum: [unpaid, paid, pending_collection, failed]
+                          nullable: true
+                        payment_method:
+                          type: string
+                          enum: [manual, direct_debit]
+                          nullable: true
+                        failure_reason:
+                          type: string
+                          nullable: true
+                        paid_at:
+                          type: string
+                          format: date-time
+                          nullable: true
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Fee period not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      operationId: getFeesFeePeriodsFeesById
+  '/fees/fee-periods/{id}/generate':
+    post:
+      tags:
+        - Fees
+      summary: Bulk-generate fees for a period, per class
+      description: |-
+        Admin and treasurer only. Gated by `fees`. Takes one amount per
+        class (see `GET /fees/classes`), entered fresh for this call —
+        not a persistent rate. A student's fee is the SUM of the amounts
+        for every class they belong to (a student can be in more than
+        one, e.g. a form class plus an after-school club — each
+        membership adds to their total); a student in none of the given
+        classes gets no row at all. Only amounts for classes that
+        actually belong to the caller's school are honored.
+
+        Idempotent — a student who already has a row for this period is
+        left untouched (their amount is not overwritten, and a paid row
+        stays paid); only students missing a row get one inserted.
+
+        Also gated by `direct_debit` (in addition to `fees`): if enabled,
+        any row inserted by this call (not a pre-existing one) for a
+        student whose parent has an active direct-debit mandate is
+        immediately submitted for collection (`payment_method` becomes
+        `direct_debit`, `status` becomes `pending_collection`) instead of
+        staying manual/unpaid. This only happens at generation time — a
+        mandate that becomes active afterward does not retroactively
+        submit fees generated before it existed.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - amounts
+              properties:
+                amounts:
+                  type: array
+                  minItems: 1
+                  items:
+                    type: object
+                    required:
+                      - class_id
+                      - amount
+                    properties:
+                      class_id:
+                        type: integer
+                      amount:
+                        type: number
+      responses:
+        '200':
+          description: Fees generated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  affectedRows:
+                    type: integer
+                  submittedForCollection:
+                    type: integer
+                    description: Of the newly-inserted rows, how many were auto-submitted for direct-debit collection.
+        '400':
+          description: Missing/empty amounts, an invalid class_id or amount, or none of the given classes belong to this school
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Fee period not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      operationId: postFeesFeePeriodsGenerateById
+  '/fees/fees/{feeId}':
+    put:
+      tags:
+        - Fees
+      summary: Edit a student's fee amount
+      description: Admin and treasurer only. Gated by `fees`. Only allowed while the fee is still `unpaid` — blocked once it's `paid` or `pending_collection` (already submitted to the direct-debit provider at its current amount).
+      parameters:
+        - name: feeId
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - amount
+              properties:
+                amount:
+                  type: number
+      responses:
+        '200':
+          $ref: '#/components/responses/MessageOk'
+        '400':
+          description: Invalid amount, or the fee is already paid or pending direct-debit collection
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Fee record not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      operationId: putFeesFeesByFeeId
+  '/fees/fees/{feeId}/mark-paid':
+    post:
+      tags:
+        - Fees
+      summary: Mark a fee as paid
+      description: Admin and treasurer only. Gated by `fees`.
+      parameters:
+        - name: feeId
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          $ref: '#/components/responses/MessageOk'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Fee record not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      operationId: postFeesFeesMarkPaidByFeeId
+  '/fees/fees/{feeId}/mark-unpaid':
+    post:
+      tags:
+        - Fees
+      summary: Mark a fee as unpaid
+      description: Admin and treasurer only. Gated by `fees`. Corrects a mistaken mark-as-paid, and also resets `payment_method`/`provider_payment_id`/`failure_reason` back to a plain manual fee (it will not be auto-resubmitted — that only happens at fee-generation time).
+      parameters:
+        - name: feeId
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          $ref: '#/components/responses/MessageOk'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Fee record not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      operationId: postFeesFeesMarkUnpaidByFeeId
+  '/fees/fees/{feeId}/simulate-collection':
+    post:
+      tags:
+        - Fees
+      summary: Simulate a provider webhook for a fee awaiting collection
+      description: |-
+        Admin and treasurer only. Gated by `fees`. Stub-payment-provider
+        test harness — moves a fee from `pending_collection` to `paid` or
+        `failed` without a real provider webhook call, using the exact
+        same transition logic `POST /fees/webhooks/direct-debit` uses.
+        Only valid while the fee is `pending_collection`. Meaningful while
+        running against the stub provider (see
+        `backend/src/utils/directDebitProvider.ts`); expected to be
+        removed or repurposed once a real provider is wired in.
+      parameters:
+        - name: feeId
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - outcome
+              properties:
+                outcome:
+                  type: string
+                  enum: [paid, failed]
+                failure_reason:
+                  type: string
+      responses:
+        '200':
+          $ref: '#/components/responses/MessageOk'
+        '400':
+          description: Invalid outcome, or the fee isn't awaiting direct-debit collection
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Fee record not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      operationId: postFeesFeesSimulateCollectionByFeeId
+  /fees/webhooks/direct-debit:
+    post:
+      tags:
+        - Fees
+      summary: Direct-debit provider webhook — payment outcome
+      description: |-
+        Unauthenticated (no session cookie applies to a server-to-server
+        callback) — instead signature-verified via an HMAC-SHA256 of the
+        raw request body in the `X-Signature` header, checked against
+        `DIRECT_DEBIT_WEBHOOK_SECRET`. Idempotent: a duplicate/replayed
+        event for an already-settled fee, or an unrecognized
+        `provider_payment_id`, is acknowledged with `200` and does
+        nothing, since providers retry webhook delivery and this route
+        has to be safe to call more than once for the same event. Not
+        gated by any feature flag — a payment already submitted before a
+        flag was disabled must still be able to settle.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - provider_payment_id
+                - event
+              properties:
+                provider_payment_id:
+                  type: string
+                event:
+                  type: string
+                  enum: [paid, failed]
+                failure_reason:
+                  type: string
+      responses:
+        '200':
+          $ref: '#/components/responses/MessageOk'
+        '400':
+          description: Invalid payload
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Missing or invalid signature
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      operationId: postFeesWebhooksDirectDebit
+  /parent/direct-debit/mandate:
+    get:
+      tags:
+        - Parent
+      summary: Get the caller's own direct-debit mandate status
+      description: Parent only. Gated by `direct_debit`.
+      responses:
+        '200':
+          description: The parent's mandate, or null if never set up
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  mandate:
+                    type: object
+                    nullable: true
+                    properties:
+                      status:
+                        type: string
+                        enum: [pending, active, cancelled]
+                      created_at:
+                        type: string
+                        format: date-time
+                      cancelled_at:
+                        type: string
+                        format: date-time
+                        nullable: true
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      operationId: getParentDirectDebitMandate
+    post:
+      tags:
+        - Parent
+      summary: Self-serve set up (or re-set-up) a direct-debit mandate
+      description: |-
+        Parent only. Gated by `direct_debit`. Creates the mandate via the
+        configured payment provider (currently a stub — no real bank
+        details ever touch this app) and stores it active. If the parent
+        previously cancelled a mandate, this reactivates the same row with
+        fresh provider IDs rather than creating a second one — there is
+        only ever one mandate per parent (`payment_mandates.parent_id` is
+        unique).
+      responses:
+        '200':
+          description: An existing cancelled mandate was reactivated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+        '201':
+          description: A new mandate was created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: A mandate is already active
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      operationId: postParentDirectDebitMandate
+  /parent/direct-debit/mandate/cancel:
+    post:
+      tags:
+        - Parent
+      summary: Cancel the caller's own direct-debit mandate
+      description: Parent only. Gated by `direct_debit`. Does not affect fees already `pending_collection` under the mandate — those still settle via the provider webhook.
+      responses:
+        '200':
+          $ref: '#/components/responses/MessageOk'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: No active mandate to cancel
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      operationId: postParentDirectDebitMandateCancel
+components:
+  securitySchemes:
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: token
+      description: httpOnly JWT set by POST /auth/login. See the top-level description for session lifetime/refresh/revocation behavior.
+  parameters:
+    ClassId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: integer
+  responses:
+    MessageOk:
+      description: Success
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              message:
+                type: string
+    BadRequest:
+      description: Validation failure
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              message:
+                type: string
+    Unauthorized:
+      description: No/invalid/expired/revoked session cookie
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              message:
+                type: string
+    Forbidden:
+      description: 'Authenticated, but not permitted (wrong role, or outside the caller''s school)'
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              message:
+                type: string
+    NotFound:
+      description: 'Not found, or exists but outside the caller''s school scope (schools are never distinguished from truly-missing, to avoid leaking existence across tenants)'
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              message:
+                type: string
+    RateLimited:
+      description: Too many requests
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              message:
+                type: string
+    ServerError:
+      description: Unexpected server error
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              message:
+                type: string
+  schemas:
+    ErrorResponse:
+      type: object
+      properties:
+        message:
+          type: string
+    MessageResponse:
+      type: object
+      properties:
+        message:
+          type: string
+    PoolStats:
+      type: object
+      description: Snapshot of the DB connection pool's current utilization.
+      properties:
+        activeConnections:
+          type: integer
+          example: 2
+        totalConnections:
+          type: integer
+          description: Physical connections opened so far (capped at connectionLimit).
+          example: 4
+        connectionLimit:
+          type: integer
+          example: 10
+        enqueuedCount:
+          type: integer
+          description: Cumulative count of requests that had to wait for a free connection since process start.
+          example: 0
+    RoleName:
+      type: string
+      enum:
+        - system_admin
+        - owner
+        - maintainer
+        - admin
+        - teacher
+        - parent
+        - student
+        - staff
+        - pending
+    JwtUser:
+      type: object
+      description: 'The decoded JWT payload, attached to every authenticated response that echoes the caller''s identity'
+      properties:
+        userId:
+          type: integer
+        username:
+          type: string
+        role:
+          $ref: '#/components/schemas/RoleName'
+        schoolId:
+          type: integer
+          nullable: true
+          description: null only for system_admin
+        tokenVersion:
+          type: integer
+        iat:
+          type: integer
+          description: Unix timestamp
+        exp:
+          type: integer
+          description: Unix timestamp
+    Class:
+      type: object
+      properties:
+        id:
+          type: integer
+        class_name:
+          type: string
+        year_group:
+          type: string
+    ClassWithSchool:
+      allOf:
+        - $ref: '#/components/schemas/Class'
+        - type: object
+          properties:
+            school_id:
+              type: integer
+            school_name:
+              type: string
+            school_code:
+              type: string
+            class_code:
+              type: string
+            description:
+              type: string
+              nullable: true
+    School:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        school_code:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+    FeatureFlag:
+      type: object
+      properties:
+        id:
+          type: integer
+        feature_key:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+          nullable: true
+        default_enabled:
+          type: boolean
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    FeatureFlagAuditLogEntry:
+      type: object
+      properties:
+        id:
+          type: integer
+        feature_flag_id:
+          type: integer
+          nullable: true
+          description: Null once the flag itself has been deleted — feature_key is kept so the entry stays readable.
+        feature_key:
+          type: string
+        school_id:
+          type: integer
+          nullable: true
+          description: Null for platform-wide actions (create/update/delete a flag); set for per-school override actions.
+        school_name:
+          type: string
+          nullable: true
+        action:
+          type: string
+          enum: [flag_created, flag_updated, flag_deleted, school_override_set, school_override_cleared]
+        actor_user_id:
+          type: integer
+          nullable: true
+        actor_username:
+          type: string
+        details:
+          type: object
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+    ChildSummary:
+      type: object
+      properties:
+        id:
+          type: integer
+        first_name:
+          type: string
+        surname:
+          type: string
+        gender:
+          type: string
+        date_of_birth:
+          type: string
+          format: date
+        guardian_code:
+          type: string
+          description: Share this with a second guardian so they can self-request linking via POST /parent/link-guardian
+    Task:
+      type: object
+      properties:
+        id:
+          type: integer
+        title:
+          type: string
+        description:
+          type: string
+          nullable: true
+        due_date:
+          type: string
+          format: date
+          nullable: true
+    TaskWithChildName:
+      allOf:
+        - $ref: '#/components/schemas/Task'
+        - type: object
+          properties:
+            child_name:
+              type: string
+            is_independent:
+              type: boolean
+    Notification:
+      type: object
+      properties:
+        id:
+          type: integer
+        audience:
+          type: string
+          enum:
+            - parent
+            - staff
+        title:
+          type: string
+        message:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+    NotificationInbox:
+      allOf:
+        - $ref: '#/components/schemas/Notification'
+        - type: object
+          properties:
+            read_at:
+              type: string
+              format: date-time
+              nullable: true
+            sender_first_name:
+              type: string
+            sender_last_name:
+              type: string
+    FullUserDetails:
+      type: object
+      description: One row from GET /admin/users-all — fields are populated from parents or staff_details depending on role; student rows have no details (Option C).
+      properties:
+        id:
+          type: integer
+        username:
+          type: string
+        role:
+          $ref: '#/components/schemas/RoleName'
+        school_name:
+          type: string
+          nullable: true
+        email:
+          type: string
+          nullable: true
+        first_name:
+          type: string
+          nullable: true
+        middle_name:
+          type: string
+          nullable: true
+        last_name:
+          type: string
+          nullable: true
+        date_of_birth:
+          type: string
+          format: date
+          nullable: true
+        address1:
+          type: string
+          nullable: true
+        address2:
+          type: string
+          nullable: true
+        address3:
+          type: string
+          nullable: true
+        city:
+          type: string
+          nullable: true
+        postcode:
+          type: string
+          nullable: true
+        medical_condition:
+          type: string
+          nullable: true
+        disability:
+          type: string
+          nullable: true
+          description: Staff roles only
+        students:
+          type: array
+          description: Populated for parent users only
+          items:
+            type: object
+            properties:
+              id:
+                type: integer
+              first_name:
+                type: string
+              surname:
+                type: string
+              address1:
+                type: string
+                nullable: true

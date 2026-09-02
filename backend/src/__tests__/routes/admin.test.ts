@@ -6,11 +6,12 @@ jest.mock("../../utils/featureFlags", () => ({
 import request from "supertest";
 import { app } from "../../app";
 import { pool } from "../../config/db";
-import { rows } from "../helpers/db";
+import { rows, mockConnection } from "../helpers/db";
 import { authCookie } from "../helpers/auth";
 import { isFeatureEnabled } from "../../utils/featureFlags";
 
 const mockQuery = pool.query as jest.Mock;
+const mockGetConnection = pool.getConnection as jest.Mock;
 const mockIsFeatureEnabled = isFeatureEnabled as jest.Mock;
 
 const adminCookie = authCookie({ userId: 1, role: "admin", schoolId: 10 });
@@ -18,6 +19,11 @@ const ownerCookie = authCookie({ userId: 2, role: "owner", schoolId: 10 });
 const sysAdminCookie = authCookie({ userId: 3, role: "system_admin", schoolId: null });
 const parentCookie = authCookie({ userId: 4, role: "parent", schoolId: 10 });
 const maintainerCookie = authCookie({ userId: 5, role: "maintainer", schoolId: 10 });
+
+// Mirrors admin.ts's own todayStr/daysAgoStr (not exported) so date-range
+// assertions stay correct regardless of what day the suite runs.
+const todayStr = () => new Date().toISOString().slice(0, 10);
+const daysAgoStr = (days: number) => new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
 
 describe("GET /api/admin/classes", () => {
   it("401s without a cookie", async () => {
@@ -272,9 +278,9 @@ describe("GET /api/admin/teachers", () => {
   it("groups classes under each teacher", async () => {
     mockQuery.mockResolvedValueOnce(
       rows([
-        { teacher_id: 1, username: "t1", email: "t1@x.com", class_id: 5, class_name: "7A", year_group: "7" },
-        { teacher_id: 1, username: "t1", email: "t1@x.com", class_id: 6, class_name: "7B", year_group: "7" },
-        { teacher_id: 2, username: "t2", email: "t2@x.com", class_id: null, class_name: null, year_group: null }
+        { teacher_id: 1, username: "t1", email: "t1@x.com", first_name: "Tara", surname: "One", class_id: 5, class_name: "7A", year_group: "7" },
+        { teacher_id: 1, username: "t1", email: "t1@x.com", first_name: "Tara", surname: "One", class_id: 6, class_name: "7B", year_group: "7" },
+        { teacher_id: 2, username: "t2", email: "t2@x.com", first_name: null, surname: null, class_id: null, class_name: null, year_group: null }
       ])
     );
 
@@ -309,11 +315,22 @@ describe("DELETE /api/admin/teachers/:id", () => {
 });
 
 describe("GET /api/admin/students-parents", () => {
-  it("returns the joined overview", async () => {
-    mockQuery.mockResolvedValueOnce(rows([{ student_id: 1 }]));
+  it("returns the joined overview with guardians (mysql2 already parses JSON_ARRAYAGG into a real array)", async () => {
+    mockQuery.mockResolvedValueOnce(
+      rows([{ student_id: 1, guardians: [{ parent_id: 9, first_name: "Sam" }] }])
+    );
     const res = await request(app).get("/api/admin/students-parents").set("Cookie", ownerCookie);
     expect(res.status).toBe(200);
-    expect(res.body).toEqual([{ student_id: 1 }]);
+    expect(res.body).toEqual([{ student_id: 1, guardians: [{ parent_id: 9, first_name: "Sam" }] }]);
+  });
+
+  it("falls back to JSON.parse if guardians comes back as a raw string", async () => {
+    mockQuery.mockResolvedValueOnce(
+      rows([{ student_id: 1, guardians: JSON.stringify([{ parent_id: 9, first_name: "Sam" }]) }])
+    );
+    const res = await request(app).get("/api/admin/students-parents").set("Cookie", ownerCookie);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual([{ student_id: 1, guardians: [{ parent_id: 9, first_name: "Sam" }] }]);
   });
 });
 
@@ -361,7 +378,10 @@ describe("GET /api/admin/users-all", () => {
           parent_email: "jane@x.com",
           staff_first_name: null,
           staff_last_name: null,
-          students: JSON.stringify([{ id: 1, first_name: "Sam", surname: "Doe", address1: "1 Road" }])
+          // mysql2 already parses a JSON_ARRAYAGG result into a real array
+          // (the column reports as MySQL type JSON) — a plain JS array here
+          // matches actual live behavior, not a JSON string.
+          students: [{ id: 1, first_name: "Sam", surname: "Doe", address1: "1 Road" }]
         }
       ])
     );
@@ -383,7 +403,7 @@ describe("GET /api/admin/users-all", () => {
           user_email: "sam@x.com",
           role: "student",
           school_name: "Ilm School",
-          students: JSON.stringify([{ id: 1, first_name: "Sam" }])
+          students: [{ id: 1, first_name: "Sam" }]
         }
       ])
     );
@@ -477,6 +497,74 @@ describe("POST /api/admin/approve/:id", () => {
 
     expect(res.status).toBe(400);
   });
+
+  it("approving a parent also flips their pending guardian link requests to approved", async () => {
+    mockQuery
+      .mockResolvedValueOnce(rows([{ school_id: 10 }])) // getUserSchoolId
+      .mockResolvedValueOnce(rows([{ id: 4 }])) // role lookup
+      .mockResolvedValueOnce(rows({})) // update users
+      .mockResolvedValueOnce(rows([{ id: 55 }])) // parent lookup
+      .mockResolvedValueOnce(rows({})); // update student_guardians
+
+    const res = await request(app)
+      .post("/api/admin/approve/9")
+      .set("Cookie", adminCookie)
+      .send({ role: "parent" });
+
+    expect(res.status).toBe(200);
+    const flipCall = mockQuery.mock.calls[4];
+    expect(flipCall[0]).toMatch(/UPDATE student_guardians SET status = 'approved'/);
+    expect(flipCall[1]).toEqual([55]);
+  });
+
+  it("provisions a login for a newly-approved child with no login yet, when password_management is on", async () => {
+    mockIsFeatureEnabled.mockResolvedValueOnce(true);
+    mockQuery
+      .mockResolvedValueOnce(rows([{ school_id: 10 }])) // getUserSchoolId
+      .mockResolvedValueOnce(rows([{ id: 4 }])) // role lookup
+      .mockResolvedValueOnce(rows({})) // update users
+      .mockResolvedValueOnce(rows([{ id: 55 }])) // parent lookup
+      .mockResolvedValueOnce(rows({})) // update student_guardians
+      .mockResolvedValueOnce(rows([{ id: 701, first_name: "Amy", surname: "Doe" }])) // children with no login
+      .mockResolvedValueOnce(rows([{ id: 7 }])) // student role lookup
+      .mockResolvedValueOnce(rows([])) // generateUniqueUsername: no collision
+      .mockResolvedValueOnce([{ insertId: 900 }]) // insert users
+      .mockResolvedValueOnce(rows({})); // update students.user_id
+
+    const res = await request(app)
+      .post("/api/admin/approve/9")
+      .set("Cookie", adminCookie)
+      .send({ role: "parent" });
+
+    expect(res.status).toBe(200);
+    expect(res.body.studentAccounts).toHaveLength(1);
+    expect(res.body.studentAccounts[0]).toMatchObject({ studentId: 701, name: "Amy Doe", username: "Amy Doe" });
+    expect(typeof res.body.studentAccounts[0].temporaryPassword).toBe("string");
+    expect(res.body.studentAccounts[0].temporaryPassword.length).toBeGreaterThan(0);
+
+    const insertCall = mockQuery.mock.calls[8];
+    expect(insertCall[0]).toMatch(/INSERT INTO users/);
+    expect(insertCall[0]).toMatch(/must_reset_password/);
+  });
+
+  it("does not provision student logins when password_management is disabled for the school", async () => {
+    mockIsFeatureEnabled.mockResolvedValueOnce(false);
+    mockQuery
+      .mockResolvedValueOnce(rows([{ school_id: 10 }])) // getUserSchoolId
+      .mockResolvedValueOnce(rows([{ id: 4 }])) // role lookup
+      .mockResolvedValueOnce(rows({})) // update users
+      .mockResolvedValueOnce(rows([{ id: 55 }])) // parent lookup
+      .mockResolvedValueOnce(rows({})); // update student_guardians
+
+    const res = await request(app)
+      .post("/api/admin/approve/9")
+      .set("Cookie", adminCookie)
+      .send({ role: "parent" });
+
+    expect(res.status).toBe(200);
+    expect(res.body.studentAccounts).toEqual([]);
+    expect(mockQuery.mock.calls).toHaveLength(5);
+  });
 });
 
 describe("POST /api/admin/reject/:id", () => {
@@ -495,18 +583,177 @@ describe("POST /api/admin/reject/:id", () => {
     expect(res.status).toBe(403);
   });
 
-  it("wipes the parent and their submitted children on rejection", async () => {
+  it("wipes a student that this parent is the sole guardian of, on rejection", async () => {
     mockQuery
-      .mockResolvedValueOnce(rows([{ school_id: 10 }]))
-      .mockResolvedValueOnce(rows([{ requested_role: "parent" }]))
+      .mockResolvedValueOnce(rows([{ school_id: 10 }])) // getUserSchoolId (adminCookie: not platform-wide, so no getUserRequestedRole call)
       .mockResolvedValueOnce(rows([{ id: 55 }])) // parent lookup
+      .mockResolvedValueOnce(rows([{ student_id: 300 }])) // sole-guardian student lookup
+      .mockResolvedValueOnce(rows({})) // delete student_classes
       .mockResolvedValueOnce(rows({})) // delete students
+      .mockResolvedValueOnce(rows({})) // delete student_guardians (any remaining requests)
       .mockResolvedValueOnce(rows({})) // delete parents
       .mockResolvedValueOnce(rows({})) // delete staff_details (no-op)
       .mockResolvedValueOnce(rows({})); // delete users
 
     const res = await request(app).post("/api/admin/reject/9").set("Cookie", adminCookie);
     expect(res.status).toBe(200);
+
+    const studentDeleteCall = mockQuery.mock.calls[4];
+    expect(studentDeleteCall[0]).toMatch(/DELETE FROM students WHERE id IN/);
+    expect(studentDeleteCall[1]).toEqual([[300]]);
+  });
+
+  it("leaves a student alone on rejection if it already has another guardian", async () => {
+    mockQuery
+      .mockResolvedValueOnce(rows([{ school_id: 10 }])) // getUserSchoolId
+      .mockResolvedValueOnce(rows([{ id: 55 }])) // parent lookup
+      .mockResolvedValueOnce(rows([])) // sole-guardian lookup: none (student has another guardian)
+      .mockResolvedValueOnce(rows({})) // delete student_guardians (drop the pending request only)
+      .mockResolvedValueOnce(rows({})) // delete parents
+      .mockResolvedValueOnce(rows({})) // delete staff_details (no-op)
+      .mockResolvedValueOnce(rows({})); // delete users
+
+    const res = await request(app).post("/api/admin/reject/9").set("Cookie", adminCookie);
+    expect(res.status).toBe(200);
+
+    // No "DELETE FROM students" call should have been made at all
+    const calledStudentDelete = mockQuery.mock.calls.some(c => /DELETE FROM students WHERE id IN/.test(c[0]));
+    expect(calledStudentDelete).toBe(false);
+  });
+});
+
+describe("POST /api/admin/users/:id/reset-password", () => {
+  it("403s for a role outside admin/owner/system_admin", async () => {
+    const res = await request(app).post("/api/admin/users/9/reset-password").set("Cookie", parentCookie);
+    expect(res.status).toBe(403);
+  });
+
+  it("404s when out of scope", async () => {
+    mockQuery.mockResolvedValueOnce(rows([]));
+    const res = await request(app).post("/api/admin/users/9/reset-password").set("Cookie", adminCookie);
+    expect(res.status).toBe(404);
+  });
+
+  it("403s when an admin tries to reset an owner's password (escalation)", async () => {
+    mockQuery
+      .mockResolvedValueOnce(rows([{ school_id: 10 }])) // getUserSchoolId
+      .mockResolvedValueOnce(rows([{ name: "owner" }])); // getUserRoleName
+    const res = await request(app).post("/api/admin/users/9/reset-password").set("Cookie", adminCookie);
+    expect(res.status).toBe(403);
+  });
+
+  it("403s when an owner tries to reset a system_admin's password (escalation)", async () => {
+    mockQuery
+      .mockResolvedValueOnce(rows([{ school_id: 10 }]))
+      .mockResolvedValueOnce(rows([{ name: "system_admin" }]));
+    const res = await request(app).post("/api/admin/users/9/reset-password").set("Cookie", ownerCookie);
+    expect(res.status).toBe(403);
+  });
+
+  it("403s when the feature is disabled for the target's school", async () => {
+    mockQuery
+      .mockResolvedValueOnce(rows([{ school_id: 10 }]))
+      .mockResolvedValueOnce(rows([{ name: "teacher" }]));
+    mockIsFeatureEnabled.mockResolvedValueOnce(false);
+    const res = await request(app).post("/api/admin/users/9/reset-password").set("Cookie", adminCookie);
+    expect(res.status).toBe(403);
+  });
+
+  it("resets the password and returns a one-time temporary password", async () => {
+    mockQuery
+      .mockResolvedValueOnce(rows([{ school_id: 10 }]))
+      .mockResolvedValueOnce(rows([{ name: "teacher" }]))
+      .mockResolvedValueOnce(rows({})); // UPDATE
+    mockIsFeatureEnabled.mockResolvedValueOnce(true);
+
+    const res = await request(app).post("/api/admin/users/9/reset-password").set("Cookie", adminCookie);
+
+    expect(res.status).toBe(200);
+    expect(typeof res.body.temporaryPassword).toBe("string");
+    expect(res.body.temporaryPassword.length).toBeGreaterThan(0);
+    expect(mockQuery).toHaveBeenLastCalledWith(
+      "UPDATE users SET password_hash = ?, token_version = token_version + 1, must_reset_password = TRUE WHERE id = ?",
+      expect.arrayContaining(["9"])
+    );
+  });
+
+  it("system_admin can reset an admin's password across schools", async () => {
+    mockQuery
+      .mockResolvedValueOnce(rows([{ school_id: 77 }]))
+      .mockResolvedValueOnce(rows([{ name: "admin" }]))
+      .mockResolvedValueOnce(rows({}));
+    mockIsFeatureEnabled.mockResolvedValueOnce(true);
+
+    const res = await request(app).post("/api/admin/users/9/reset-password").set("Cookie", sysAdminCookie);
+    expect(res.status).toBe(200);
+  });
+});
+
+describe("POST /api/admin/students/:id/generate-login", () => {
+  it("403s for a role outside admin/owner/system_admin", async () => {
+    const res = await request(app).post("/api/admin/students/1/generate-login").set("Cookie", parentCookie);
+    expect(res.status).toBe(403);
+  });
+
+  it("404s when out of scope", async () => {
+    mockQuery.mockResolvedValueOnce(rows([]));
+    const res = await request(app).post("/api/admin/students/1/generate-login").set("Cookie", adminCookie);
+    expect(res.status).toBe(404);
+  });
+
+  it("400s when the student already has a login", async () => {
+    mockQuery.mockResolvedValueOnce(
+      rows([{ school_id: 10, user_id: 900, first_name: "Amy", surname: "Doe" }])
+    );
+    const res = await request(app).post("/api/admin/students/1/generate-login").set("Cookie", adminCookie);
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/already has a login/);
+  });
+
+  it("403s when password_management is disabled for the student's school", async () => {
+    mockQuery.mockResolvedValueOnce(
+      rows([{ school_id: 10, user_id: null, first_name: "Amy", surname: "Doe" }])
+    );
+    mockIsFeatureEnabled.mockResolvedValueOnce(false);
+    const res = await request(app).post("/api/admin/students/1/generate-login").set("Cookie", adminCookie);
+    expect(res.status).toBe(403);
+  });
+
+  it("creates a login and returns a username and one-time temporary password", async () => {
+    mockQuery
+      .mockResolvedValueOnce(rows([{ school_id: 10, user_id: null, first_name: "Amy", surname: "Doe" }])) // student lookup
+      .mockResolvedValueOnce(rows([{ id: 7 }])) // student role lookup
+      .mockResolvedValueOnce(rows([])) // generateUniqueUsername: no collision
+      .mockResolvedValueOnce([{ insertId: 900 }]) // insert users
+      .mockResolvedValueOnce(rows({})); // update students.user_id
+    mockIsFeatureEnabled.mockResolvedValueOnce(true);
+
+    const res = await request(app).post("/api/admin/students/1/generate-login").set("Cookie", adminCookie);
+
+    expect(res.status).toBe(200);
+    expect(res.body.username).toBe("Amy Doe");
+    expect(typeof res.body.temporaryPassword).toBe("string");
+    expect(res.body.temporaryPassword.length).toBeGreaterThan(0);
+
+    const insertCall = mockQuery.mock.calls[3];
+    expect(insertCall[0]).toMatch(/INSERT INTO users/);
+    expect(insertCall[0]).toMatch(/must_reset_password/);
+  });
+
+  it("disambiguates the username on a collision", async () => {
+    mockQuery
+      .mockResolvedValueOnce(rows([{ school_id: 10, user_id: null, first_name: "Amy", surname: "Doe" }])) // student lookup
+      .mockResolvedValueOnce(rows([{ id: 7 }])) // student role lookup
+      .mockResolvedValueOnce(rows([{ id: 1 }])) // "Amy Doe" taken
+      .mockResolvedValueOnce(rows([])) // "Amy Doe 2" free
+      .mockResolvedValueOnce([{ insertId: 901 }]) // insert users
+      .mockResolvedValueOnce(rows({})); // update students.user_id
+    mockIsFeatureEnabled.mockResolvedValueOnce(true);
+
+    const res = await request(app).post("/api/admin/students/1/generate-login").set("Cookie", adminCookie);
+
+    expect(res.status).toBe(200);
+    expect(res.body.username).toBe("Amy Doe 2");
   });
 });
 
@@ -555,6 +802,157 @@ describe("DELETE /api/admin/remove-parent/:id", () => {
     const res = await request(app).delete("/api/admin/remove-parent/1").set("Cookie", adminCookie);
     expect(res.status).toBe(200);
     expect(mockQuery.mock.calls[4][0]).toMatch(/DELETE FROM users/);
+  });
+});
+
+describe("GET /api/admin/guardian-requests", () => {
+  it("403s for a role outside STAFF_MGMT", async () => {
+    const res = await request(app).get("/api/admin/guardian-requests").set("Cookie", parentCookie);
+    expect(res.status).toBe(403);
+  });
+
+  it("returns pending requests for the caller's school", async () => {
+    mockQuery.mockResolvedValueOnce(rows([{ student_id: 1, parent_id: 2 }]));
+    const res = await request(app).get("/api/admin/guardian-requests").set("Cookie", adminCookie);
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(1);
+  });
+});
+
+describe("POST /api/admin/guardian-requests/approve", () => {
+  it("400s when student_id or parent_id is missing", async () => {
+    const res = await request(app)
+      .post("/api/admin/guardian-requests/approve")
+      .set("Cookie", adminCookie)
+      .send({ student_id: 1 });
+    expect(res.status).toBe(400);
+  });
+
+  it("404s when the student is out of scope", async () => {
+    mockQuery.mockResolvedValueOnce(rows([]));
+    const res = await request(app)
+      .post("/api/admin/guardian-requests/approve")
+      .set("Cookie", adminCookie)
+      .send({ student_id: 1, parent_id: 2 });
+    expect(res.status).toBe(404);
+  });
+
+  it("404s when there's no matching pending request", async () => {
+    mockQuery
+      .mockResolvedValueOnce(rows([{ school_id: 10 }]))
+      .mockResolvedValueOnce([{ affectedRows: 0 }]);
+    const res = await request(app)
+      .post("/api/admin/guardian-requests/approve")
+      .set("Cookie", adminCookie)
+      .send({ student_id: 1, parent_id: 2 });
+    expect(res.status).toBe(404);
+  });
+
+  it("approves the pending request", async () => {
+    mockQuery
+      .mockResolvedValueOnce(rows([{ school_id: 10 }]))
+      .mockResolvedValueOnce([{ affectedRows: 1 }]);
+    const res = await request(app)
+      .post("/api/admin/guardian-requests/approve")
+      .set("Cookie", adminCookie)
+      .send({ student_id: 1, parent_id: 2 });
+    expect(res.status).toBe(200);
+  });
+});
+
+describe("POST /api/admin/guardian-requests/reject", () => {
+  it("400s when student_id or parent_id is missing", async () => {
+    const res = await request(app)
+      .post("/api/admin/guardian-requests/reject")
+      .set("Cookie", adminCookie)
+      .send({ parent_id: 2 });
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects the pending request", async () => {
+    mockQuery
+      .mockResolvedValueOnce(rows([{ school_id: 10 }]))
+      .mockResolvedValueOnce([{ affectedRows: 1 }]);
+    const res = await request(app)
+      .post("/api/admin/guardian-requests/reject")
+      .set("Cookie", adminCookie)
+      .send({ student_id: 1, parent_id: 2 });
+    expect(res.status).toBe(200);
+  });
+});
+
+describe("POST /api/admin/students/:studentId/assign-guardian", () => {
+  it("400s when parent_id is missing", async () => {
+    const res = await request(app)
+      .post("/api/admin/students/1/assign-guardian")
+      .set("Cookie", adminCookie)
+      .send({});
+    expect(res.status).toBe(400);
+  });
+
+  it("404s when the student is out of scope", async () => {
+    mockQuery.mockResolvedValueOnce(rows([]));
+    const res = await request(app)
+      .post("/api/admin/students/1/assign-guardian")
+      .set("Cookie", adminCookie)
+      .send({ parent_id: 2 });
+    expect(res.status).toBe(404);
+  });
+
+  it("400s when the parent belongs to a different school", async () => {
+    mockQuery
+      .mockResolvedValueOnce(rows([{ school_id: 10 }])) // student's school
+      .mockResolvedValueOnce(rows([{ school_id: 99 }])); // parent's school (different)
+    const res = await request(app)
+      .post("/api/admin/students/1/assign-guardian")
+      .set("Cookie", adminCookie)
+      .send({ parent_id: 2 });
+    expect(res.status).toBe(400);
+  });
+
+  it("assigns the guardian", async () => {
+    mockQuery
+      .mockResolvedValueOnce(rows([{ school_id: 10 }]))
+      .mockResolvedValueOnce(rows([{ school_id: 10 }]))
+      .mockResolvedValueOnce(rows({}));
+    const res = await request(app)
+      .post("/api/admin/students/1/assign-guardian")
+      .set("Cookie", adminCookie)
+      .send({ parent_id: 2 });
+    expect(res.status).toBe(200);
+  });
+});
+
+describe("POST /api/admin/students/:studentId/remove-guardian", () => {
+  it("400s when parent_id is missing", async () => {
+    const res = await request(app)
+      .post("/api/admin/students/1/remove-guardian")
+      .set("Cookie", adminCookie)
+      .send({});
+    expect(res.status).toBe(400);
+  });
+
+  it("400s when this is the student's only guardian", async () => {
+    mockQuery
+      .mockResolvedValueOnce(rows([{ school_id: 10 }]))
+      .mockResolvedValueOnce(rows([{ cnt: 1 }]));
+    const res = await request(app)
+      .post("/api/admin/students/1/remove-guardian")
+      .set("Cookie", adminCookie)
+      .send({ parent_id: 2 });
+    expect(res.status).toBe(400);
+  });
+
+  it("removes the guardian when another one remains", async () => {
+    mockQuery
+      .mockResolvedValueOnce(rows([{ school_id: 10 }]))
+      .mockResolvedValueOnce(rows([{ cnt: 2 }]))
+      .mockResolvedValueOnce(rows({}));
+    const res = await request(app)
+      .post("/api/admin/students/1/remove-guardian")
+      .set("Cookie", adminCookie)
+      .send({ parent_id: 2 });
+    expect(res.status).toBe(200);
   });
 });
 
@@ -771,5 +1169,403 @@ describe("GET /api/admin/attendance/report", () => {
     expect(res.headers["content-type"]).toMatch(/text\/csv/);
     expect(res.headers["content-disposition"]).toMatch(/attachment/);
     expect(res.text).toContain("Sam,Doe,7A,Present");
+  });
+});
+
+describe("GET /api/admin/analytics", () => {
+  it("403s for a role outside admin/owner", async () => {
+    const res = await request(app).get("/api/admin/analytics").set("Cookie", parentCookie);
+    expect(res.status).toBe(403);
+  });
+
+  it("403s when the feature is disabled", async () => {
+    mockIsFeatureEnabled.mockResolvedValueOnce(false);
+    const res = await request(app).get("/api/admin/analytics").set("Cookie", ownerCookie);
+    expect(res.status).toBe(403);
+  });
+
+  it("400s on an invalid range value", async () => {
+    mockIsFeatureEnabled.mockResolvedValueOnce(true);
+    const res = await request(app).get("/api/admin/analytics?range=foo").set("Cookie", ownerCookie);
+    expect(res.status).toBe(400);
+  });
+
+  it("falls back to the last 30 days when no current term exists", async () => {
+    mockIsFeatureEnabled.mockResolvedValueOnce(true);
+    mockQuery
+      .mockResolvedValueOnce(rows([])) // resolveCurrentTerm: no matching term
+      .mockResolvedValueOnce(rows([])) // attendance rows
+      .mockResolvedValueOnce(rows([])); // class rows
+
+    const res = await request(app).get("/api/admin/analytics").set("Cookie", ownerCookie);
+
+    expect(res.status).toBe(200);
+    expect(res.body.attendanceTrend.range).toBe("term");
+    expect(res.body.attendanceTrend.termName).toBeNull();
+    expect(res.body.attendanceTrend.rangeEnd).toBe(todayStr());
+  });
+
+  it("uses the current term's date range when one covers today", async () => {
+    mockIsFeatureEnabled.mockResolvedValueOnce(true);
+    mockQuery
+      .mockResolvedValueOnce(rows([{ name: "Term 1", start_date: "2026-01-01", end_date: "2099-01-01" }]))
+      .mockResolvedValueOnce(rows([]))
+      .mockResolvedValueOnce(rows([]));
+
+    const res = await request(app).get("/api/admin/analytics").set("Cookie", ownerCookie);
+
+    expect(res.status).toBe(200);
+    expect(res.body.attendanceTrend.termName).toBe("Term 1");
+    expect(res.body.attendanceTrend.rangeStart).toBe("2026-01-01");
+    // end_date is in the future, so rangeEnd is clamped to today, not the term's end_date
+    expect(res.body.attendanceTrend.rangeEnd).toBe(todayStr());
+  });
+
+  it("uses a trailing 365-day window for range=year regardless of any current term", async () => {
+    mockIsFeatureEnabled.mockResolvedValueOnce(true);
+    mockQuery
+      .mockResolvedValueOnce(rows([])) // attendance rows
+      .mockResolvedValueOnce(rows([])); // class rows
+
+    const res = await request(app).get("/api/admin/analytics?range=year").set("Cookie", ownerCookie);
+
+    expect(res.status).toBe(200);
+    expect(res.body.attendanceTrend.range).toBe("year");
+    expect(res.body.attendanceTrend.termName).toBeNull();
+    expect(res.body.attendanceTrend.rangeStart).toBe(daysAgoStr(365));
+    // range=year never resolves a term, so only 2 queries run (no school_terms lookup)
+    expect(mockQuery).toHaveBeenCalledTimes(2);
+  });
+
+  it("computes attendance rate per day and excludes days with no records from division", async () => {
+    mockIsFeatureEnabled.mockResolvedValueOnce(true);
+    mockQuery
+      .mockResolvedValueOnce(rows([])) // no current term
+      .mockResolvedValueOnce(
+        rows([
+          { date: "2026-01-01", present_count: 18, total_count: 20 },
+          { date: "2026-01-02", present_count: 0, total_count: 0 }
+        ])
+      )
+      .mockResolvedValueOnce(rows([]));
+
+    const res = await request(app).get("/api/admin/analytics").set("Cookie", ownerCookie);
+
+    expect(res.status).toBe(200);
+    expect(res.body.attendanceTrend.points).toEqual([
+      { date: "2026-01-01", rate: 0.9 },
+      { date: "2026-01-02", rate: null }
+    ]);
+  });
+
+  it("includes a class with zero enrolled students as a zero bar", async () => {
+    mockIsFeatureEnabled.mockResolvedValueOnce(true);
+    mockQuery
+      .mockResolvedValueOnce(rows([]))
+      .mockResolvedValueOnce(rows([]))
+      .mockResolvedValueOnce(
+        rows([
+          { class_id: 1, class_name: "Year 7A", student_count: 28 },
+          { class_id: 2, class_name: null, student_count: 0 }
+        ])
+      );
+
+    const res = await request(app).get("/api/admin/analytics").set("Cookie", ownerCookie);
+
+    expect(res.status).toBe(200);
+    expect(res.body.studentsPerClass).toEqual([
+      { classId: 1, className: "Year 7A", studentCount: 28 },
+      { classId: 2, className: "(Unnamed class)", studentCount: 0 }
+    ]);
+  });
+
+  it("returns 200 with empty arrays for a school with no classes or attendance", async () => {
+    mockIsFeatureEnabled.mockResolvedValueOnce(true);
+    mockQuery
+      .mockResolvedValueOnce(rows([]))
+      .mockResolvedValueOnce(rows([]))
+      .mockResolvedValueOnce(rows([]));
+
+    const res = await request(app).get("/api/admin/analytics").set("Cookie", ownerCookie);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      attendanceTrend: {
+        range: "term",
+        rangeStart: daysAgoStr(30),
+        rangeEnd: todayStr(),
+        termName: null,
+        points: []
+      },
+      studentsPerClass: [],
+      feesTrend: null
+    });
+  });
+
+  it("400s on an invalid feesRange value", async () => {
+    mockIsFeatureEnabled.mockResolvedValueOnce(true);
+    const res = await request(app).get("/api/admin/analytics?feesRange=foo").set("Cookie", ownerCookie);
+    expect(res.status).toBe(400);
+  });
+
+  it("omits feesTrend (null) when the fees flag is disabled", async () => {
+    mockIsFeatureEnabled
+      .mockResolvedValueOnce(true) // analytics_dashboard
+      .mockResolvedValueOnce(false); // fees
+    mockQuery
+      .mockResolvedValueOnce(rows([]))
+      .mockResolvedValueOnce(rows([]))
+      .mockResolvedValueOnce(rows([]));
+
+    const res = await request(app).get("/api/admin/analytics").set("Cookie", ownerCookie);
+
+    expect(res.status).toBe(200);
+    expect(res.body.feesTrend).toBeNull();
+  });
+
+  it("returns fees collected/outstanding per period for feesRange=month", async () => {
+    mockIsFeatureEnabled
+      .mockResolvedValueOnce(true) // analytics_dashboard
+      .mockResolvedValueOnce(true); // fees
+    mockQuery
+      .mockResolvedValueOnce(rows([])) // no current term
+      .mockResolvedValueOnce(rows([])) // attendance rows
+      .mockResolvedValueOnce(rows([])) // class rows
+      .mockResolvedValueOnce(
+        rows([{ label: "September 2026", collected: "150.00", outstanding: "300.00" }])
+      );
+
+    const res = await request(app).get("/api/admin/analytics").set("Cookie", ownerCookie);
+
+    expect(res.status).toBe(200);
+    expect(res.body.feesTrend).toEqual({
+      range: "month",
+      points: [{ label: "September 2026", collected: 150, outstanding: 300 }]
+    });
+  });
+
+  it("aggregates fees by calendar year for feesRange=year", async () => {
+    mockIsFeatureEnabled
+      .mockResolvedValueOnce(true) // analytics_dashboard
+      .mockResolvedValueOnce(true); // fees
+    mockQuery
+      .mockResolvedValueOnce(rows([])) // no current term
+      .mockResolvedValueOnce(rows([])) // attendance rows
+      .mockResolvedValueOnce(rows([])) // class rows
+      .mockResolvedValueOnce(rows([{ label: "2026", collected: "450.00", outstanding: "150.00" }]));
+
+    const res = await request(app).get("/api/admin/analytics?feesRange=year").set("Cookie", ownerCookie);
+
+    expect(res.status).toBe(200);
+    expect(res.body.feesTrend).toEqual({
+      range: "year",
+      points: [{ label: "2026", collected: 450, outstanding: 150 }]
+    });
+  });
+});
+
+describe("POST /api/admin/students/bulk-upload", () => {
+  const goodRow = (overrides: Record<string, any> = {}) => ({
+    student_first_name: "Sam",
+    student_surname: "Doe",
+    student_gender: "Male",
+    student_date_of_birth: "2015-01-01",
+    class_code: "7A",
+    parent_first_name: "Jane",
+    parent_surname: "Doe",
+    parent_relationship_to_student: "Mother",
+    parent_contact_number: "5551234",
+    parent_email: "jane.doe@example.com",
+    ...overrides
+  });
+
+  it("403s for a role outside admin (e.g. owner)", async () => {
+    const res = await request(app)
+      .post("/api/admin/students/bulk-upload")
+      .set("Cookie", ownerCookie)
+      .send({ rows: [goodRow()] });
+    expect(res.status).toBe(403);
+  });
+
+  it("400s when rows is missing or empty", async () => {
+    const res = await request(app).post("/api/admin/students/bulk-upload").set("Cookie", adminCookie).send({ rows: [] });
+    expect(res.status).toBe(400);
+  });
+
+  it("400s when the row count exceeds the cap", async () => {
+    const res = await request(app)
+      .post("/api/admin/students/bulk-upload")
+      .set("Cookie", adminCookie)
+      .send({ rows: Array.from({ length: 501 }, () => goodRow()) });
+    expect(res.status).toBe(400);
+  });
+
+  it("reports a missing-field row as an error without touching the database", async () => {
+    mockQuery
+      .mockResolvedValueOnce(rows([{ id: 9 }])) // parent role lookup
+      .mockResolvedValueOnce(rows([{ id: 7 }])); // student role lookup
+
+    const res = await request(app)
+      .post("/api/admin/students/bulk-upload")
+      .set("Cookie", adminCookie)
+      .send({ rows: [goodRow({ student_first_name: "" })] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.results[0]).toMatchObject({ row: 1, status: "error" });
+    expect(res.body.results[0].message).toMatch(/student_first_name/);
+    expect(mockGetConnection).not.toHaveBeenCalled();
+  });
+
+  it("errors a row with an invalid class code", async () => {
+    mockQuery
+      .mockResolvedValueOnce(rows([{ id: 9 }])) // parent role lookup
+      .mockResolvedValueOnce(rows([{ id: 7 }])) // student role lookup
+      .mockResolvedValueOnce(rows([])); // class lookup: not found
+
+    const res = await request(app)
+      .post("/api/admin/students/bulk-upload")
+      .set("Cookie", adminCookie)
+      .send({ rows: [goodRow({ class_code: "BADCODE" })] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.results[0]).toMatchObject({ row: 1, status: "error" });
+    expect(res.body.results[0].message).toMatch(/Invalid class code/);
+  });
+
+  it("errors a row whose email belongs to a non-parent account", async () => {
+    mockQuery
+      .mockResolvedValueOnce(rows([{ id: 9 }])) // parent role lookup
+      .mockResolvedValueOnce(rows([{ id: 7 }])) // student role lookup
+      .mockResolvedValueOnce(rows([{ id: 77 }])) // class lookup
+      .mockResolvedValueOnce(rows([{ id: 55, role_name: "teacher" }])); // existing user, wrong role
+
+    const res = await request(app)
+      .post("/api/admin/students/bulk-upload")
+      .set("Cookie", adminCookie)
+      .send({ rows: [goodRow()] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.results[0]).toMatchObject({ row: 1, status: "error" });
+    expect(res.body.results[0].message).toMatch(/non-parent account/);
+  });
+
+  it("links an existing parent (by email) as an additional guardian without creating a new account", async () => {
+    const conn = mockConnection();
+    mockGetConnection.mockResolvedValueOnce(conn);
+
+    mockQuery
+      .mockResolvedValueOnce(rows([{ id: 9 }])) // parent role lookup
+      .mockResolvedValueOnce(rows([{ id: 7 }])) // student role lookup
+      .mockResolvedValueOnce(rows([{ id: 77 }])) // class lookup
+      .mockResolvedValueOnce(rows([{ id: 55, role_name: "parent" }])); // existing user found
+
+    conn.query
+      .mockResolvedValueOnce(rows([{ id: 200 }])) // parents lookup by user_id
+      .mockResolvedValueOnce(rows([])) // guardian_code uniqueness check
+      .mockResolvedValueOnce([{ insertId: 300 }]) // insert student
+      .mockResolvedValueOnce([{}]) // insert student_guardians
+      .mockResolvedValueOnce([{}]); // insert student_classes
+
+    const res = await request(app)
+      .post("/api/admin/students/bulk-upload")
+      .set("Cookie", adminCookie)
+      .send({ rows: [goodRow()] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.results[0]).toMatchObject({ row: 1, status: "created", studentId: 300, parentCreated: false });
+    expect(res.body.results[0].temporaryPassword).toBeUndefined();
+    expect(conn.commit).toHaveBeenCalled();
+  });
+
+  it("creates a new parent account and returns a temporary password when the email is unknown", async () => {
+    const conn = mockConnection();
+    mockGetConnection.mockResolvedValueOnce(conn);
+
+    mockQuery
+      .mockResolvedValueOnce(rows([{ id: 9 }])) // parent role lookup
+      .mockResolvedValueOnce(rows([{ id: 7 }])) // student role lookup
+      .mockResolvedValueOnce(rows([{ id: 77 }])) // class lookup
+      .mockResolvedValueOnce(rows([])); // no existing user with this email
+
+    conn.query
+      .mockResolvedValueOnce([{ insertId: 400 }]) // insert users
+      .mockResolvedValueOnce([{ insertId: 401 }]) // insert parents
+      .mockResolvedValueOnce(rows([])) // guardian_code uniqueness check
+      .mockResolvedValueOnce([{ insertId: 500 }]) // insert student
+      .mockResolvedValueOnce([{}]) // insert student_guardians
+      .mockResolvedValueOnce([{}]); // insert student_classes
+
+    const res = await request(app)
+      .post("/api/admin/students/bulk-upload")
+      .set("Cookie", adminCookie)
+      .send({ rows: [goodRow()] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.results[0]).toMatchObject({ row: 1, status: "created", studentId: 500, parentCreated: true });
+    expect(typeof res.body.results[0].temporaryPassword).toBe("string");
+    expect(res.body.results[0].temporaryPassword.length).toBeGreaterThan(0);
+  });
+
+  it("processes a bad row without affecting the others in the same batch", async () => {
+    const conn = mockConnection();
+    mockGetConnection.mockResolvedValueOnce(conn);
+
+    mockQuery
+      .mockResolvedValueOnce(rows([{ id: 9 }])) // parent role lookup (once per request)
+      .mockResolvedValueOnce(rows([{ id: 7 }])) // student role lookup (once per request)
+      // Row 1 (good, existing parent):
+      .mockResolvedValueOnce(rows([{ id: 77 }])) // class lookup
+      .mockResolvedValueOnce(rows([{ id: 55, role_name: "parent" }])) // existing user
+      // Row 2 (bad class code):
+      .mockResolvedValueOnce(rows([])); // class lookup: not found
+
+    conn.query
+      .mockResolvedValueOnce(rows([{ id: 200 }])) // parents lookup by user_id
+      .mockResolvedValueOnce(rows([])) // guardian_code uniqueness check
+      .mockResolvedValueOnce([{ insertId: 300 }]) // insert student
+      .mockResolvedValueOnce([{}]) // insert student_guardians
+      .mockResolvedValueOnce([{}]); // insert student_classes
+
+    const res = await request(app)
+      .post("/api/admin/students/bulk-upload")
+      .set("Cookie", adminCookie)
+      .send({ rows: [goodRow(), goodRow({ class_code: "BADCODE", parent_email: "other@example.com" })] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.summary).toEqual({ total: 2, succeeded: 1, failed: 1 });
+    expect(res.body.results[0]).toMatchObject({ row: 1, status: "created" });
+    expect(res.body.results[1]).toMatchObject({ row: 2, status: "error" });
+  });
+
+  it("also provisions a student login when password_management is enabled", async () => {
+    mockIsFeatureEnabled.mockResolvedValueOnce(true);
+    const conn = mockConnection();
+    mockGetConnection.mockResolvedValueOnce(conn);
+
+    mockQuery
+      .mockResolvedValueOnce(rows([{ id: 9 }])) // parent role lookup
+      .mockResolvedValueOnce(rows([{ id: 7 }])) // student role lookup
+      .mockResolvedValueOnce(rows([{ id: 77 }])) // class lookup
+      .mockResolvedValueOnce(rows([{ id: 55, role_name: "parent" }])); // existing user found
+
+    conn.query
+      .mockResolvedValueOnce(rows([{ id: 200 }])) // parents lookup by user_id
+      .mockResolvedValueOnce(rows([])) // guardian_code uniqueness check
+      .mockResolvedValueOnce([{ insertId: 300 }]) // insert student
+      .mockResolvedValueOnce([{}]) // insert student_guardians
+      .mockResolvedValueOnce([{}]) // insert student_classes
+      .mockResolvedValueOnce(rows([])) // generateUniqueUsername: no collision
+      .mockResolvedValueOnce([{ insertId: 900 }]) // insert users (student)
+      .mockResolvedValueOnce(rows({})); // update students.user_id
+
+    const res = await request(app)
+      .post("/api/admin/students/bulk-upload")
+      .set("Cookie", adminCookie)
+      .send({ rows: [goodRow()] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.results[0]).toMatchObject({ row: 1, status: "created", studentUsername: "Sam Doe" });
+    expect(typeof res.body.results[0].studentTemporaryPassword).toBe("string");
+    expect(res.body.results[0].studentTemporaryPassword.length).toBeGreaterThan(0);
   });
 });

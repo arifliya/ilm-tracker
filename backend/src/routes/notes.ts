@@ -3,6 +3,7 @@ import { pool } from "../config/db";
 import { authMiddleware } from "../middleware/auth";
 import { AuthenticatedRequest } from "../types/auth";
 import { isFeatureEnabled } from "../utils/featureFlags";
+import { asyncHandler } from "../utils/asyncHandler";
 
 const router = Router();
 
@@ -11,20 +12,22 @@ const router = Router();
 // their own children only. Students and system_admin are deliberately
 // excluded: these notes are about a student, not for them, and system_admin
 // has no single school to be "staff" in.
-const STAFF_ROLES = ["teacher", "staff", "admin", "owner", "maintainer"];
+const STAFF_ROLES = ["teacher", "staff", "admin", "owner", "maintainer", "treasurer"];
 
 const loadStudent = async (studentId: number) => {
   const [rows] = await pool.query(
-    "SELECT id, school_id, parent_id FROM students WHERE id = ?",
+    "SELECT id, school_id FROM students WHERE id = ?",
     [studentId]
   );
   return (rows as any[])[0] || null;
 };
 
-const isOwnChild = async (userId: number, parentId: number) => {
+const isOwnChild = async (userId: number, studentId: number) => {
   const [rows] = await pool.query(
-    "SELECT 1 FROM parents WHERE id = ? AND user_id = ?",
-    [parentId, userId]
+    `SELECT 1 FROM student_guardians sg
+     JOIN parents p ON p.id = sg.parent_id
+     WHERE sg.student_id = ? AND p.user_id = ? AND sg.status = 'approved'`,
+    [studentId, userId]
   );
   return (rows as any[]).length > 0;
 };
@@ -43,8 +46,10 @@ const teachesStudent = async (teacherId: number, studentId: number) => {
    GET NOTES FOR A STUDENT
    Staff (same school) or the student's own parent. Never the student.
    ============================================================ */
-router.get("/students/:studentId", authMiddleware, async (req: AuthenticatedRequest, res) => {
-  try {
+router.get(
+  "/students/:studentId",
+  authMiddleware,
+  asyncHandler(async (req: AuthenticatedRequest, res) => {
     const studentId = Number(req.params.studentId);
     const student = await loadStudent(studentId);
     if (!student) return res.status(404).json({ message: "Student not found" });
@@ -57,7 +62,7 @@ router.get("/students/:studentId", authMiddleware, async (req: AuthenticatedRequ
     const allowed = STAFF_ROLES.includes(role)
       ? req.user!.schoolId === student.school_id
       : role === "parent"
-      ? await isOwnChild(req.user!.userId, student.parent_id)
+      ? await isOwnChild(req.user!.userId, student.id)
       : false;
 
     if (!allowed) {
@@ -79,19 +84,18 @@ router.get("/students/:studentId", authMiddleware, async (req: AuthenticatedRequ
     );
 
     res.json({ notes: rows });
-  } catch (err) {
-    console.error("Load student notes error:", err);
-    res.status(500).json({ message: "Failed to load notes" });
-  }
-});
+  })
+);
 
 /* ============================================================
    ADD A NOTE FOR A STUDENT — STAFF ONLY
    Teachers are further restricted to students in one of their own classes,
    matching this feature's entry point on the attendance page.
    ============================================================ */
-router.post("/students/:studentId", authMiddleware, async (req: AuthenticatedRequest, res) => {
-  try {
+router.post(
+  "/students/:studentId",
+  authMiddleware,
+  asyncHandler(async (req: AuthenticatedRequest, res) => {
     const role = req.user!.role;
     if (!STAFF_ROLES.includes(role)) {
       return res.status(403).json({ message: "Forbidden" });
@@ -124,10 +128,7 @@ router.post("/students/:studentId", authMiddleware, async (req: AuthenticatedReq
     );
 
     res.status(201).json({ message: "Note added" });
-  } catch (err) {
-    console.error("Add student note error:", err);
-    res.status(500).json({ message: "Failed to add note" });
-  }
-});
+  })
+);
 
 export default router;

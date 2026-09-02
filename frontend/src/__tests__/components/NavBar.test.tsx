@@ -7,7 +7,7 @@ import Navbar from "../../components/NavBar";
 import { AuthContext } from "../../AuthContext";
 
 const renderNavbar = (user: any, logout = vi.fn().mockResolvedValue(undefined), onMenuClick?: () => void) => {
-  const value = { user, loading: false, login: vi.fn(), logout };
+  const value = { user, loading: false, login: vi.fn(), logout, refreshUser: vi.fn() };
   return render(
     <MemoryRouter>
       <AuthContext.Provider value={value}>

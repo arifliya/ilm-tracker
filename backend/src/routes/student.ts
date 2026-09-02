@@ -2,14 +2,18 @@ import { Router } from "express";
 import { pool } from "../config/db";
 import { authMiddleware, requireRole } from "../middleware/auth";
 import { AuthenticatedRequest } from "../types/auth";
+import { asyncHandler } from "../utils/asyncHandler";
 
 const router = Router();
 
 const STUDENT_ONLY = requireRole("student");
 
 // GET classes student is enrolled in
-router.get("/classes", authMiddleware, STUDENT_ONLY, async (req: AuthenticatedRequest, res) => {
-  try {
+router.get(
+  "/classes",
+  authMiddleware,
+  STUDENT_ONLY,
+  asyncHandler(async (req: AuthenticatedRequest, res) => {
     const studentUserId = req.user!.userId;
 
     const [rows] = await pool.query(
@@ -22,15 +26,15 @@ router.get("/classes", authMiddleware, STUDENT_ONLY, async (req: AuthenticatedRe
     );
 
     res.json({ classes: rows });
-  } catch (err) {
-    console.error("Student classes error:", err);
-    res.status(500).json({ message: "Failed to load classes" });
-  }
-});
+  })
+);
 
 // GET tasks assigned to student's class
-router.get("/tasks", authMiddleware, STUDENT_ONLY, async (req: AuthenticatedRequest, res) => {
-  try {
+router.get(
+  "/tasks",
+  authMiddleware,
+  STUDENT_ONLY,
+  asyncHandler(async (req: AuthenticatedRequest, res) => {
     const studentUserId = req.user!.userId;
 
     const [rows] = await pool.query(
@@ -45,10 +49,7 @@ router.get("/tasks", authMiddleware, STUDENT_ONLY, async (req: AuthenticatedRequ
     );
 
     res.json({ tasks: rows });
-  } catch (err) {
-    console.error("Student tasks error:", err);
-    res.status(500).json({ message: "Failed to load tasks" });
-  }
-});
+  })
+);
 
 export default router;

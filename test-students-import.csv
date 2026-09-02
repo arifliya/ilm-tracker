@@ -1,0 +1,5 @@
+student_first_name,student_middle_name,student_surname,student_gender,student_date_of_birth,student_address1,student_address2,student_address3,student_city,student_postcode,student_medical_condition,class_code,parent_first_name,parent_middle_name,parent_surname,parent_relationship_to_student,parent_date_of_birth,parent_address1,parent_address2,parent_address3,parent_city,parent_postcode,parent_medical_condition,parent_contact_number,parent_email
+Oliver,,Smith,Male,2015-03-12,4 Elm Street,,,Leicester,LE1 4AB,,11A,Grace,,Smith,Mother,1985-06-20,4 Elm Street,,,Leicester,LE1 4AB,,07700900501,grace.smith.test@example.com
+Amelia,Rose,Chen,Female,2014-09-05,22 Birch Avenue,,,Leicester,LE2 5CD,Mild eczema,10A,Wei,,Chen,Father,1983-11-02,22 Birch Avenue,,,Leicester,LE2 5CD,,07700900502,wei.chen.test@example.com
+Zara,,Ahmed,Female,2016-04-22,9 Clarendon Park Road,,,Leicester,LE2 3AH,,9A,Farida,,Ahmed,Mother,,,,,,,,07700900110,farida.ahmed@example.com
+Noah,,Okafor,Male,2013-01-18,15 Maple Grove,,,Leicester,LE3 6EF,,BADCODE,Chidi,,Okafor,Father,1980-02-14,15 Maple Grove,,,Leicester,LE3 6EF,,07700900504,chidi.okafor.test@example.com

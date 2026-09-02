@@ -1,6 +1,7 @@
 jest.mock("../../config/db");
 jest.mock("../../utils/featureFlags", () => ({
-  resetExpiredFeatureFlags: jest.fn().mockResolvedValue(undefined)
+  resetExpiredFeatureFlags: jest.fn().mockResolvedValue(undefined),
+  isFeatureEnabled: jest.fn()
 }));
 
 import request from "supertest";
@@ -8,8 +9,10 @@ import { app } from "../../app";
 import { pool } from "../../config/db";
 import { rows } from "../helpers/db";
 import { authCookie } from "../helpers/auth";
+import { isFeatureEnabled } from "../../utils/featureFlags";
 
 const mockQuery = pool.query as jest.Mock;
+const mockIsFeatureEnabled = isFeatureEnabled as jest.Mock;
 
 const sysAdminCookie = authCookie({ userId: 1, role: "system_admin", schoolId: null });
 const ownerCookie = authCookie({ userId: 2, role: "owner", schoolId: 10 });
@@ -116,7 +119,10 @@ describe("POST /api/system-admin/feature-flags", () => {
   });
 
   it("creates a feature flag and normalizes the expiry datetime", async () => {
-    mockQuery.mockResolvedValueOnce(rows([])).mockResolvedValueOnce(rows({}));
+    mockQuery
+      .mockResolvedValueOnce(rows([])) // key uniqueness check
+      .mockResolvedValueOnce(rows({ insertId: 5 })) // insert
+      .mockResolvedValueOnce(rows({})); // audit log insert
 
     const res = await request(app)
       .post("/api/system-admin/feature-flags")
@@ -138,7 +144,10 @@ describe("PUT /api/system-admin/feature-flags/:id/schools/:schoolId", () => {
   });
 
   it("sets the per-school override", async () => {
-    mockQuery.mockResolvedValueOnce(rows({}));
+    mockQuery
+      .mockResolvedValueOnce(rows([{ feature_key: "notifications" }])) // flag lookup
+      .mockResolvedValueOnce(rows({})) // upsert
+      .mockResolvedValueOnce(rows({})); // audit log insert
     const res = await request(app)
       .put("/api/system-admin/feature-flags/1/schools/2")
       .set("Cookie", sysAdminCookie)
@@ -146,10 +155,21 @@ describe("PUT /api/system-admin/feature-flags/:id/schools/:schoolId", () => {
     expect(res.status).toBe(200);
   });
 
-  it("404s when the flag or school doesn't exist (FK violation)", async () => {
-    mockQuery.mockRejectedValueOnce({ code: "ER_NO_REFERENCED_ROW_2" });
+  it("404s when the flag doesn't exist", async () => {
+    mockQuery.mockResolvedValueOnce(rows([])); // flag lookup finds nothing
     const res = await request(app)
       .put("/api/system-admin/feature-flags/999/schools/2")
+      .set("Cookie", sysAdminCookie)
+      .send({ enabled: true });
+    expect(res.status).toBe(404);
+  });
+
+  it("404s when the school doesn't exist (FK violation on insert)", async () => {
+    mockQuery
+      .mockResolvedValueOnce(rows([{ feature_key: "notifications" }])) // flag lookup
+      .mockRejectedValueOnce({ code: "ER_NO_REFERENCED_ROW_2" }); // upsert fails on bad schoolId
+    const res = await request(app)
+      .put("/api/system-admin/feature-flags/1/schools/999")
       .set("Cookie", sysAdminCookie)
       .send({ enabled: true });
     expect(res.status).toBe(404);
@@ -158,11 +178,25 @@ describe("PUT /api/system-admin/feature-flags/:id/schools/:schoolId", () => {
 
 describe("DELETE /api/system-admin/feature-flags/:id/schools/:schoolId", () => {
   it("clears the override", async () => {
-    mockQuery.mockResolvedValueOnce(rows({}));
+    mockQuery
+      .mockResolvedValueOnce(rows([{ feature_key: "notifications" }])) // flag lookup
+      .mockResolvedValueOnce(rows({ affectedRows: 1 })) // delete
+      .mockResolvedValueOnce(rows({})); // audit log insert
     const res = await request(app)
       .delete("/api/system-admin/feature-flags/1/schools/2")
       .set("Cookie", sysAdminCookie);
     expect(res.status).toBe(200);
+  });
+
+  it("skips the audit log when nothing was actually cleared", async () => {
+    mockQuery
+      .mockResolvedValueOnce(rows([{ feature_key: "notifications" }])) // flag lookup
+      .mockResolvedValueOnce(rows({ affectedRows: 0 })); // delete, no override existed
+    const res = await request(app)
+      .delete("/api/system-admin/feature-flags/1/schools/2")
+      .set("Cookie", sysAdminCookie);
+    expect(res.status).toBe(200);
+    expect(mockQuery).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -175,8 +209,8 @@ describe("PUT /api/system-admin/feature-flags/:id", () => {
     expect(res.status).toBe(400);
   });
 
-  it("404s when no row was affected", async () => {
-    mockQuery.mockResolvedValueOnce(rows({ affectedRows: 0 }));
+  it("404s when the flag doesn't exist", async () => {
+    mockQuery.mockResolvedValueOnce(rows([])); // flag lookup finds nothing
     const res = await request(app)
       .put("/api/system-admin/feature-flags/999")
       .set("Cookie", sysAdminCookie)
@@ -185,7 +219,10 @@ describe("PUT /api/system-admin/feature-flags/:id", () => {
   });
 
   it("updates the flag metadata", async () => {
-    mockQuery.mockResolvedValueOnce(rows({ affectedRows: 1 }));
+    mockQuery
+      .mockResolvedValueOnce(rows([{ feature_key: "notifications" }])) // flag lookup
+      .mockResolvedValueOnce(rows({})) // update
+      .mockResolvedValueOnce(rows({})); // audit log insert
     const res = await request(app)
       .put("/api/system-admin/feature-flags/1")
       .set("Cookie", sysAdminCookie)
@@ -195,15 +232,95 @@ describe("PUT /api/system-admin/feature-flags/:id", () => {
 });
 
 describe("DELETE /api/system-admin/feature-flags/:id", () => {
-  it("404s when no row was affected", async () => {
-    mockQuery.mockResolvedValueOnce(rows({ affectedRows: 0 }));
+  it("404s when the flag doesn't exist", async () => {
+    mockQuery.mockResolvedValueOnce(rows([])); // flag lookup finds nothing
     const res = await request(app).delete("/api/system-admin/feature-flags/999").set("Cookie", sysAdminCookie);
     expect(res.status).toBe(404);
   });
 
   it("deletes the flag", async () => {
-    mockQuery.mockResolvedValueOnce(rows({ affectedRows: 1 }));
+    mockQuery
+      .mockResolvedValueOnce(rows([{ feature_key: "notifications" }])) // flag lookup
+      .mockResolvedValueOnce(rows({ affectedRows: 1 })) // delete
+      .mockResolvedValueOnce(rows({})); // audit log insert
     const res = await request(app).delete("/api/system-admin/feature-flags/1").set("Cookie", sysAdminCookie);
     expect(res.status).toBe(200);
+  });
+});
+
+describe("GET /api/system-admin/feature-flags/audit-log", () => {
+  it("403s for a non-system_admin", async () => {
+    const res = await request(app).get("/api/system-admin/feature-flags/audit-log").set("Cookie", ownerCookie);
+    expect(res.status).toBe(403);
+  });
+
+  it("returns recent audit entries", async () => {
+    mockQuery.mockResolvedValueOnce(
+      rows([
+        {
+          id: 1,
+          feature_flag_id: 1,
+          feature_key: "notifications",
+          school_id: 1,
+          school_name: "Ilm School",
+          action: "school_override_set",
+          actor_user_id: 1,
+          actor_username: "sysadmin",
+          details: { enabled: true },
+          created_at: "2026-01-01 10:00:00"
+        }
+      ])
+    );
+    const res = await request(app).get("/api/system-admin/feature-flags/audit-log").set("Cookie", sysAdminCookie);
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(1);
+    expect(res.body[0].action).toBe("school_override_set");
+  });
+});
+
+describe("POST /api/system-admin/owners/:id/reset-password", () => {
+  it("403s for a non-system_admin", async () => {
+    const res = await request(app).post("/api/system-admin/owners/5/reset-password").set("Cookie", ownerCookie);
+    expect(res.status).toBe(403);
+  });
+
+  it("404s when the user doesn't exist", async () => {
+    mockQuery.mockResolvedValueOnce(rows([]));
+    const res = await request(app)
+      .post("/api/system-admin/owners/999/reset-password")
+      .set("Cookie", sysAdminCookie);
+    expect(res.status).toBe(404);
+  });
+
+  it("403s when the target user is not an owner", async () => {
+    mockQuery.mockResolvedValueOnce(rows([{ school_id: 10, role_name: "teacher" }]));
+    const res = await request(app)
+      .post("/api/system-admin/owners/5/reset-password")
+      .set("Cookie", sysAdminCookie);
+    expect(res.status).toBe(403);
+  });
+
+  it("403s when password management is disabled for the owner's school", async () => {
+    mockQuery.mockResolvedValueOnce(rows([{ school_id: 10, role_name: "owner" }]));
+    mockIsFeatureEnabled.mockResolvedValueOnce(false);
+    const res = await request(app)
+      .post("/api/system-admin/owners/5/reset-password")
+      .set("Cookie", sysAdminCookie);
+    expect(res.status).toBe(403);
+  });
+
+  it("resets the owner's password and returns a one-time temporary password", async () => {
+    mockQuery
+      .mockResolvedValueOnce(rows([{ school_id: 10, role_name: "owner" }])) // user lookup
+      .mockResolvedValueOnce(rows({})); // update
+    mockIsFeatureEnabled.mockResolvedValueOnce(true);
+
+    const res = await request(app)
+      .post("/api/system-admin/owners/5/reset-password")
+      .set("Cookie", sysAdminCookie);
+
+    expect(res.status).toBe(200);
+    expect(res.body.temporaryPassword).toBeTruthy();
+    expect(mockQuery.mock.calls[1][1][1]).toBe("5");
   });
 });

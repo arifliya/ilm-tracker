@@ -3,6 +3,7 @@ import { pool } from "../config/db";
 import { authMiddleware, requireRole } from "../middleware/auth";
 import { AuthenticatedRequest } from "../types/auth";
 import { isFeatureEnabled } from "../utils/featureFlags";
+import { asyncHandler } from "../utils/asyncHandler";
 
 const router = Router();
 
@@ -19,13 +20,16 @@ type Audience = (typeof AUDIENCES)[number];
 // and school leadership (admin/owner/maintainer). system_admin is excluded:
 // it's a platform-level role with no single school to be a recipient in.
 const audienceRoleNames = (audience: Audience) =>
-  audience === "parent" ? ["parent"] : ["teacher", "staff", "admin", "owner", "maintainer"];
+  audience === "parent" ? ["parent"] : ["teacher", "staff", "admin", "owner", "maintainer", "treasurer"];
 
 /* ============================================================
    SEND A NOTIFICATION
    ============================================================ */
-router.post("/", authMiddleware, SENDERS, async (req: AuthenticatedRequest, res) => {
-  try {
+router.post(
+  "/",
+  authMiddleware,
+  SENDERS,
+  asyncHandler(async (req: AuthenticatedRequest, res) => {
     const { audience, title, message } = req.body;
     const schoolId = isPlatformWide(req) ? req.body.school_id : req.user!.schoolId;
 
@@ -83,17 +87,17 @@ router.post("/", authMiddleware, SENDERS, async (req: AuthenticatedRequest, res)
     } finally {
       conn.release();
     }
-  } catch (err) {
-    console.error("Send notification error:", err);
-    res.status(500).json({ message: "Failed to send notification" });
-  }
-});
+  })
+);
 
 /* ============================================================
    SENT NOTIFICATIONS (HISTORY) — SENDERS ONLY
    ============================================================ */
-router.get("/sent", authMiddleware, SENDERS, async (req: AuthenticatedRequest, res) => {
-  try {
+router.get(
+  "/sent",
+  authMiddleware,
+  SENDERS,
+  asyncHandler(async (req: AuthenticatedRequest, res) => {
     const params: any[] = [];
     let where = "";
     if (!isPlatformWide(req)) {
@@ -123,11 +127,8 @@ router.get("/sent", authMiddleware, SENDERS, async (req: AuthenticatedRequest, r
     );
 
     res.json(rows);
-  } catch (err) {
-    console.error("Load sent notifications error:", err);
-    res.status(500).json({ message: "Failed to load sent notifications" });
-  }
-});
+  })
+);
 
 /* ============================================================
    MY NOTIFICATIONS (ANY AUTHENTICATED USER)
@@ -135,8 +136,10 @@ router.get("/sent", authMiddleware, SENDERS, async (req: AuthenticatedRequest, r
    school with the flag off shouldn't see any notifications UI at all,
    inbox included, not just the ability to send.
    ============================================================ */
-router.get("/", authMiddleware, async (req: AuthenticatedRequest, res) => {
-  try {
+router.get(
+  "/",
+  authMiddleware,
+  asyncHandler(async (req: AuthenticatedRequest, res) => {
     if (!(await isFeatureEnabled("notifications", req.user!.schoolId))) {
       return res.json([]);
     }
@@ -160,17 +163,16 @@ router.get("/", authMiddleware, async (req: AuthenticatedRequest, res) => {
     );
 
     res.json(rows);
-  } catch (err) {
-    console.error("Load my notifications error:", err);
-    res.status(500).json({ message: "Failed to load notifications" });
-  }
-});
+  })
+);
 
 /* ============================================================
    MARK A NOTIFICATION AS READ
    ============================================================ */
-router.post("/:id/read", authMiddleware, async (req: AuthenticatedRequest, res) => {
-  try {
+router.post(
+  "/:id/read",
+  authMiddleware,
+  asyncHandler(async (req: AuthenticatedRequest, res) => {
     if (!(await isFeatureEnabled("notifications", req.user!.schoolId))) {
       return res.status(403).json({ message: "The notifications feature is currently disabled for this school" });
     }
@@ -193,10 +195,7 @@ router.post("/:id/read", authMiddleware, async (req: AuthenticatedRequest, res) 
     }
 
     res.json({ message: "Marked as read" });
-  } catch (err) {
-    console.error("Mark notification read error:", err);
-    res.status(500).json({ message: "Failed to mark notification as read" });
-  }
-});
+  })
+);
 
 export default router;

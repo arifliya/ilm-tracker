@@ -5,5 +5,6 @@ module.exports = {
   roots: ["<rootDir>/src"],
   testMatch: ["**/__tests__/**/*.test.ts"],
   resetMocks: true,
-  setupFiles: ["<rootDir>/src/__tests__/setupEnv.ts"]
+  setupFiles: ["<rootDir>/src/__tests__/setupEnv.ts"],
+  setupFilesAfterEnv: ["<rootDir>/src/__tests__/setupAuthMocks.ts"]
 };

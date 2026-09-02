@@ -59,6 +59,16 @@ describe("AppRouter", () => {
     expect(await screen.findByRole("button", { name: "Login" })).toBeInTheDocument();
   });
 
+  it("redirects a user with mustResetPassword to /force-password-reset instead of their dashboard", async () => {
+    mockGet.mockResolvedValue({
+      data: { user: { userId: 1, username: "jdoe", role: "teacher", mustResetPassword: true } }
+    });
+
+    renderAt("/dashboard");
+
+    expect(await screen.findByRole("heading", { name: "Password Reset Required" })).toBeInTheDocument();
+  });
+
   it("redirects an unknown path back to Home", async () => {
     renderAt("/this-route-does-not-exist");
     expect(await screen.findByRole("heading", { name: "ilm School Portal" })).toBeInTheDocument();

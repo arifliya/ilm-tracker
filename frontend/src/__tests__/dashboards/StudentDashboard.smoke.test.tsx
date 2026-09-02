@@ -17,7 +17,8 @@ const authValue = {
   user: { userId: 1, username: "student1", role: "student" as const },
   loading: false,
   login: vi.fn(),
-  logout: vi.fn()
+  logout: vi.fn(),
+  refreshUser: vi.fn()
 };
 
 describe("StudentDashboard (smoke)", () => {

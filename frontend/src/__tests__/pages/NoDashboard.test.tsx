@@ -19,7 +19,8 @@ const renderPage = (logout = vi.fn().mockResolvedValue(undefined)) => {
     user: { userId: 1, username: "jdoe", role: "staff" as any },
     loading: false,
     login: vi.fn(),
-    logout
+    logout,
+    refreshUser: vi.fn()
   };
   return render(
     <MemoryRouter initialEntries={["/no-dashboard"]}>

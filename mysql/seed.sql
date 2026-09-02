@@ -1,11 +1,13 @@
 -- ============================
 -- DEMO / TEST DATA
 -- ============================
--- Runs after init.sql (docker-entrypoint-initdb.d executes *.sql files in
--- this directory alphabetically, and "init.sql" sorts before "seed.sql").
--- init.sql already created the schema, the roles catalog, the feature flag
--- catalog, and the sysadmin account — this file only adds demo content on
--- top of that. Every account below shares the dev password: Passw0rd!
+-- NOT run automatically — schema is now managed by Liquibase
+-- (liquibase/changelog/), which only ever runs schema changesets, never
+-- data. Load this manually against a schema that already exists (the
+-- baseline changeset creates the roles catalog, the feature flag catalog,
+-- and the sysadmin account; this file only adds demo content on top of
+-- that). Run it with: ./scripts/seed-db.sh
+-- Every account below shares the dev password: Passw0rd!
 
 -- ============================
 -- SCHOOLS
@@ -29,7 +31,8 @@ VALUES
 ('e.clarke', 'e.clarke@ilmschool.local', '$2a$10$HdcMkFwYY5bPIOGHZ4atAux5XlH.c5Vmx4tG21lUhHYpm0853rM0S', (SELECT id FROM roles WHERE name='teacher'), (SELECT id FROM schools WHERE school_code='ILM2026')),
 ('r.nguyen', 'r.nguyen@ilmschool.local', '$2a$10$HdcMkFwYY5bPIOGHZ4atAux5XlH.c5Vmx4tG21lUhHYpm0853rM0S', (SELECT id FROM roles WHERE name='teacher'), (SELECT id FROM schools WHERE school_code='ILM2026')),
 ('a.rahman', 'a.rahman@ilmschool.local', '$2a$10$HdcMkFwYY5bPIOGHZ4atAux5XlH.c5Vmx4tG21lUhHYpm0853rM0S', (SELECT id FROM roles WHERE name='teacher'), (SELECT id FROM schools WHERE school_code='ILM2026')),
-('m.sullivan', 'm.sullivan@ilmschool.local', '$2a$10$HdcMkFwYY5bPIOGHZ4atAux5XlH.c5Vmx4tG21lUhHYpm0853rM0S', (SELECT id FROM roles WHERE name='teacher'), (SELECT id FROM schools WHERE school_code='ILM2026'));
+('m.sullivan', 'm.sullivan@ilmschool.local', '$2a$10$HdcMkFwYY5bPIOGHZ4atAux5XlH.c5Vmx4tG21lUhHYpm0853rM0S', (SELECT id FROM roles WHERE name='teacher'), (SELECT id FROM schools WHERE school_code='ILM2026')),
+('treasurer1', 'hannah.brooks@ilmschool.local', '$2a$10$HdcMkFwYY5bPIOGHZ4atAux5XlH.c5Vmx4tG21lUhHYpm0853rM0S', (SELECT id FROM roles WHERE name='treasurer'), (SELECT id FROM schools WHERE school_code='ILM2026'));
 
 -- Ilm School parents
 INSERT INTO users (username, email, password_hash, role_id, school_id)
@@ -82,6 +85,10 @@ INSERT INTO users (username, email, password_hash, role_id, school_id)
 VALUES
 ('owner2', 'olivia.green@greenwood.local', '$2a$10$HdcMkFwYY5bPIOGHZ4atAux5XlH.c5Vmx4tG21lUhHYpm0853rM0S', (SELECT id FROM roles WHERE name='owner'), (SELECT id FROM schools WHERE school_code='GRN2026')),
 ('t.khalid', 't.khalid@greenwood.local', '$2a$10$HdcMkFwYY5bPIOGHZ4atAux5XlH.c5Vmx4tG21lUhHYpm0853rM0S', (SELECT id FROM roles WHERE name='teacher'), (SELECT id FROM schools WHERE school_code='GRN2026')),
+-- No flag overrides exist for GRN2026 (see SCHOOL FEATURE FLAG OVERRIDES
+-- below) — treasurer2 is a fixture for E2E "feature disabled" journeys,
+-- deliberately on the school where every flag is off by default.
+('treasurer2', 'nadia.hussein@greenwood.local', '$2a$10$HdcMkFwYY5bPIOGHZ4atAux5XlH.c5Vmx4tG21lUhHYpm0853rM0S', (SELECT id FROM roles WHERE name='treasurer'), (SELECT id FROM schools WHERE school_code='GRN2026')),
 ('helen.turner', 'helen.turner@example.com', '$2a$10$HdcMkFwYY5bPIOGHZ4atAux5XlH.c5Vmx4tG21lUhHYpm0853rM0S', (SELECT id FROM roles WHERE name='parent'), (SELECT id FROM schools WHERE school_code='GRN2026')),
 ('samuel.osei-mensah', 'samuel.osei-mensah@example.com', '$2a$10$HdcMkFwYY5bPIOGHZ4atAux5XlH.c5Vmx4tG21lUhHYpm0853rM0S', (SELECT id FROM roles WHERE name='parent'), (SELECT id FROM schools WHERE school_code='GRN2026')),
 ('fatima.zahra', 'fatima.zahra@example.com', '$2a$10$HdcMkFwYY5bPIOGHZ4atAux5XlH.c5Vmx4tG21lUhHYpm0853rM0S', (SELECT id FROM roles WHERE name='parent'), (SELECT id FROM schools WHERE school_code='GRN2026'));
@@ -167,8 +174,12 @@ VALUES
  'Aisha', 'Rahman', 'Female', '19 Welford Road', 'Leicester', 'LE2 6EH', 'a.rahman@ilmschool.local', '07700900007'),
 ((SELECT id FROM users WHERE username='m.sullivan'), (SELECT id FROM schools WHERE school_code='ILM2026'),
  'Mark', 'Sullivan', 'Male', '33 Narborough Road', 'Leicester', 'LE3 0PE', 'm.sullivan@ilmschool.local', '07700900008'),
+((SELECT id FROM users WHERE username='treasurer1'), (SELECT id FROM schools WHERE school_code='ILM2026'),
+ 'Hannah', 'Brooks', 'Female', '52 St Saviours Road', 'Leicester', 'LE5 3HD', 'hannah.brooks@ilmschool.local', '07700900009'),
 ((SELECT id FROM users WHERE username='owner2'), (SELECT id FROM schools WHERE school_code='GRN2026'),
  'Olivia', 'Green', 'Female', '12 Leicester Road', 'Loughborough', 'LE11 2AB', 'olivia.green@greenwood.local', '07700900200'),
+((SELECT id FROM users WHERE username='treasurer2'), (SELECT id FROM schools WHERE school_code='GRN2026'),
+ 'Nadia', 'Hussein', 'Female', '9 Leicester Road', 'Loughborough', 'LE11 2AB', 'nadia.hussein@greenwood.local', '07700900205'),
 ((SELECT id FROM users WHERE username='t.khalid'), (SELECT id FROM schools WHERE school_code='GRN2026'),
  'Tariq', 'Khalid', 'Male', '22 Leicester Road', 'Loughborough', 'LE11 2AB', 't.khalid@greenwood.local', '07700900204');
 
@@ -209,86 +220,140 @@ VALUES
 -- ============================
 
 -- Year 7A
-INSERT INTO students (parent_id, school_id, user_id, first_name, surname, gender, date_of_birth, address1, city, postcode)
+INSERT INTO students (school_id, user_id, first_name, surname, gender, date_of_birth, address1, city, postcode, guardian_code)
 VALUES
-((SELECT id FROM parents WHERE user_id=(SELECT id FROM users WHERE username='parent1')), (SELECT id FROM schools WHERE school_code='ILM2026'), (SELECT id FROM users WHERE username='adamk'),
- 'Adam', 'Khan', 'male', '2014-06-10', '12 Maple Street', 'Leicester', 'LE1 2AB'),
-((SELECT id FROM parents WHERE user_id=(SELECT id FROM users WHERE username='yusuf.mahmoud')), (SELECT id FROM schools WHERE school_code='ILM2026'), (SELECT id FROM users WHERE username='zainabm'),
- 'Zainab', 'Mahmoud', 'female', '2014-02-18', '8 Narborough Road', 'Leicester', 'LE3 0PB'),
-((SELECT id FROM parents WHERE user_id=(SELECT id FROM users WHERE username='farida.ahmed')), (SELECT id FROM schools WHERE school_code='ILM2026'), (SELECT id FROM users WHERE username='laylaa'),
- 'Layla', 'Ahmed', 'female', '2013-11-30', '9 Clarendon Park Road', 'Leicester', 'LE2 3AH');
+((SELECT id FROM schools WHERE school_code='ILM2026'), (SELECT id FROM users WHERE username='adamk'),
+ 'Adam', 'Khan', 'male', '2014-06-10', '12 Maple Street', 'Leicester', 'LE1 2AB', 'STUD0001'),
+((SELECT id FROM schools WHERE school_code='ILM2026'), (SELECT id FROM users WHERE username='zainabm'),
+ 'Zainab', 'Mahmoud', 'female', '2014-02-18', '8 Narborough Road', 'Leicester', 'LE3 0PB', 'STUD0002'),
+((SELECT id FROM schools WHERE school_code='ILM2026'), (SELECT id FROM users WHERE username='laylaa'),
+ 'Layla', 'Ahmed', 'female', '2013-11-30', '9 Clarendon Park Road', 'Leicester', 'LE2 3AH', 'STUD0003');
 
 -- Year 7B
-INSERT INTO students (parent_id, school_id, user_id, first_name, surname, gender, date_of_birth, address1, city, postcode)
+INSERT INTO students (school_id, user_id, first_name, surname, gender, date_of_birth, address1, city, postcode, guardian_code)
 VALUES
-((SELECT id FROM parents WHERE user_id=(SELECT id FROM users WHERE username='laura.bennett')), (SELECT id FROM schools WHERE school_code='ILM2026'), (SELECT id FROM users WHERE username='oliverb'),
- 'Oliver', 'Bennett', 'male', '2014-08-05', '24 Fosse Road North', 'Leicester', 'LE3 5AH'),
-((SELECT id FROM parents WHERE user_id=(SELECT id FROM users WHERE username='rachel.thompson')), (SELECT id FROM schools WHERE school_code='ILM2026'), (SELECT id FROM users WHERE username='charlottet'),
- 'Charlotte', 'Thompson', 'female', '2014-01-22', '45 Aylestone Road', 'Leicester', 'LE2 7LN'),
-((SELECT id FROM parents WHERE user_id=(SELECT id FROM users WHERE username='tom.lewis')), (SELECT id FROM schools WHERE school_code='ILM2026'), (SELECT id FROM users WHERE username='sophiel'),
- 'Sophie', 'Lewis', 'female', '2014-04-14', '40 London Road', 'Leicester', 'LE2 1ND');
+((SELECT id FROM schools WHERE school_code='ILM2026'), (SELECT id FROM users WHERE username='oliverb'),
+ 'Oliver', 'Bennett', 'male', '2014-08-05', '24 Fosse Road North', 'Leicester', 'LE3 5AH', 'STUD0004'),
+((SELECT id FROM schools WHERE school_code='ILM2026'), (SELECT id FROM users WHERE username='charlottet'),
+ 'Charlotte', 'Thompson', 'female', '2014-01-22', '45 Aylestone Road', 'Leicester', 'LE2 7LN', 'STUD0005'),
+((SELECT id FROM schools WHERE school_code='ILM2026'), (SELECT id FROM users WHERE username='sophiel'),
+ 'Sophie', 'Lewis', 'female', '2014-04-14', '40 London Road', 'Leicester', 'LE2 1ND', 'STUD0006');
 
 -- Year 8A
-INSERT INTO students (parent_id, school_id, user_id, first_name, surname, gender, date_of_birth, address1, city, postcode, medical_condition)
+INSERT INTO students (school_id, user_id, first_name, surname, gender, date_of_birth, address1, city, postcode, medical_condition, guardian_code)
 VALUES
-((SELECT id FROM parents WHERE user_id=(SELECT id FROM users WHERE username='kwame.osei')), (SELECT id FROM schools WHERE school_code='ILM2026'), (SELECT id FROM users WHERE username='niao'),
- 'Nia', 'Osei', 'female', '2013-03-09', '3 Uppingham Road', 'Leicester', 'LE5 0QF', NULL),
-((SELECT id FROM parents WHERE user_id=(SELECT id FROM users WHERE username='reema.patel')), (SELECT id FROM schools WHERE school_code='ILM2026'), (SELECT id FROM users WHERE username='aryanp'),
- 'Aryan', 'Patel', 'male', '2013-07-27', '67 Melton Road', 'Leicester', 'LE4 5EA', 'Mild asthma — inhaler kept in school office'),
-((SELECT id FROM parents WHERE user_id=(SELECT id FROM users WHERE username='karen.bailey')), (SELECT id FROM schools WHERE school_code='ILM2026'), (SELECT id FROM users WHERE username='jackb'),
- 'Jack', 'Bailey', 'male', '2013-12-01', '2 Victoria Park Road', 'Leicester', 'LE2 1XA', NULL);
+((SELECT id FROM schools WHERE school_code='ILM2026'), (SELECT id FROM users WHERE username='niao'),
+ 'Nia', 'Osei', 'female', '2013-03-09', '3 Uppingham Road', 'Leicester', 'LE5 0QF', NULL, 'STUD0007'),
+((SELECT id FROM schools WHERE school_code='ILM2026'), (SELECT id FROM users WHERE username='aryanp'),
+ 'Aryan', 'Patel', 'male', '2013-07-27', '67 Melton Road', 'Leicester', 'LE4 5EA', 'Mild asthma — inhaler kept in school office', 'STUD0008'),
+((SELECT id FROM schools WHERE school_code='ILM2026'), (SELECT id FROM users WHERE username='jackb'),
+ 'Jack', 'Bailey', 'male', '2013-12-01', '2 Victoria Park Road', 'Leicester', 'LE2 1XA', NULL, 'STUD0009');
 
 -- Year 8B
-INSERT INTO students (parent_id, school_id, user_id, first_name, surname, gender, date_of_birth, address1, city, postcode)
+INSERT INTO students (school_id, user_id, first_name, surname, gender, date_of_birth, address1, city, postcode, guardian_code)
 VALUES
-((SELECT id FROM parents WHERE user_id=(SELECT id FROM users WHERE username='parent1')), (SELECT id FROM schools WHERE school_code='ILM2026'), (SELECT id FROM users WHERE username='sarak'),
- 'Sara', 'Khan', 'female', '2013-11-22', '12 Maple Street', 'Leicester', 'LE1 2AB'),
-((SELECT id FROM parents WHERE user_id=(SELECT id FROM users WHERE username='grace.wallace')), (SELECT id FROM schools WHERE school_code='ILM2026'), (SELECT id FROM users WHERE username='ethanw'),
- 'Ethan', 'Wallace', 'male', '2013-05-16', '19 Hinckley Road', 'Leicester', 'LE3 0RA'),
-((SELECT id FROM parents WHERE user_id=(SELECT id FROM users WHERE username='amanda.kelly')), (SELECT id FROM schools WHERE school_code='ILM2026'), (SELECT id FROM users WHERE username='chloek'),
- 'Chloe', 'Kelly', 'female', '2013-09-08', '17 Ashby Road', 'Leicester', 'LE1 8ZP');
+((SELECT id FROM schools WHERE school_code='ILM2026'), (SELECT id FROM users WHERE username='sarak'),
+ 'Sara', 'Khan', 'female', '2013-11-22', '12 Maple Street', 'Leicester', 'LE1 2AB', 'STUD0010'),
+((SELECT id FROM schools WHERE school_code='ILM2026'), (SELECT id FROM users WHERE username='ethanw'),
+ 'Ethan', 'Wallace', 'male', '2013-05-16', '19 Hinckley Road', 'Leicester', 'LE3 0RA', 'STUD0011'),
+((SELECT id FROM schools WHERE school_code='ILM2026'), (SELECT id FROM users WHERE username='chloek'),
+ 'Chloe', 'Kelly', 'female', '2013-09-08', '17 Ashby Road', 'Leicester', 'LE1 8ZP', 'STUD0012');
 
 -- Year 9A
-INSERT INTO students (parent_id, school_id, user_id, first_name, surname, gender, date_of_birth, address1, city, postcode, medical_condition)
+INSERT INTO students (school_id, user_id, first_name, surname, gender, date_of_birth, address1, city, postcode, medical_condition, guardian_code)
 VALUES
-((SELECT id FROM parents WHERE user_id=(SELECT id FROM users WHERE username='yusuf.mahmoud')), (SELECT id FROM schools WHERE school_code='ILM2026'), (SELECT id FROM users WHERE username='ibrahimm'),
- 'Ibrahim', 'Mahmoud', 'male', '2012-06-25', '8 Narborough Road', 'Leicester', 'LE3 0PB', NULL),
-((SELECT id FROM parents WHERE user_id=(SELECT id FROM users WHERE username='bilal.hussain')), (SELECT id FROM schools WHERE school_code='ILM2026'), (SELECT id FROM users WHERE username='maryamh'),
- 'Maryam', 'Hussain', 'female', '2012-02-14', '5 Gipsy Lane', 'Leicester', 'LE4 6RB', 'Type 1 diabetes — care plan on file with school nurse'),
-((SELECT id FROM parents WHERE user_id=(SELECT id FROM users WHERE username='elena.novak')), (SELECT id FROM schools WHERE school_code='ILM2026'), (SELECT id FROM users WHERE username='filipn'),
- 'Filip', 'Novak', 'male', '2012-10-03', '31 Welford Road', 'Leicester', 'LE2 6EH', NULL);
+((SELECT id FROM schools WHERE school_code='ILM2026'), (SELECT id FROM users WHERE username='ibrahimm'),
+ 'Ibrahim', 'Mahmoud', 'male', '2012-06-25', '8 Narborough Road', 'Leicester', 'LE3 0PB', NULL, 'STUD0013'),
+((SELECT id FROM schools WHERE school_code='ILM2026'), (SELECT id FROM users WHERE username='maryamh'),
+ 'Maryam', 'Hussain', 'female', '2012-02-14', '5 Gipsy Lane', 'Leicester', 'LE4 6RB', 'Type 1 diabetes — care plan on file with school nurse', 'STUD0014'),
+((SELECT id FROM schools WHERE school_code='ILM2026'), (SELECT id FROM users WHERE username='filipn'),
+ 'Filip', 'Novak', 'male', '2012-10-03', '31 Welford Road', 'Leicester', 'LE2 6EH', NULL, 'STUD0015');
 
 -- Year 10A
-INSERT INTO students (parent_id, school_id, user_id, first_name, surname, gender, date_of_birth, address1, city, postcode)
+INSERT INTO students (school_id, user_id, first_name, surname, gender, date_of_birth, address1, city, postcode, guardian_code)
 VALUES
-((SELECT id FROM parents WHERE user_id=(SELECT id FROM users WHERE username='craig.douglas')), (SELECT id FROM schools WHERE school_code='ILM2026'), (SELECT id FROM users WHERE username='ryand'),
- 'Ryan', 'Douglas', 'male', '2011-04-19', '14 Evington Road', 'Leicester', 'LE2 1HL'),
-((SELECT id FROM parents WHERE user_id=(SELECT id FROM users WHERE username='farida.ahmed')), (SELECT id FROM schools WHERE school_code='ILM2026'), (SELECT id FROM users WHERE username='yusufa'),
- 'Yusuf', 'Ahmed', 'male', '2011-08-30', '9 Clarendon Park Road', 'Leicester', 'LE2 3AH'),
-((SELECT id FROM parents WHERE user_id=(SELECT id FROM users WHERE username='susan.price')), (SELECT id FROM schools WHERE school_code='ILM2026'), (SELECT id FROM users WHERE username='danielp'),
- 'Daniel', 'Price', 'male', '2011-01-12', '28 Charnwood Street', 'Leicester', 'LE2 1TB');
+((SELECT id FROM schools WHERE school_code='ILM2026'), (SELECT id FROM users WHERE username='ryand'),
+ 'Ryan', 'Douglas', 'male', '2011-04-19', '14 Evington Road', 'Leicester', 'LE2 1HL', 'STUD0016'),
+((SELECT id FROM schools WHERE school_code='ILM2026'), (SELECT id FROM users WHERE username='yusufa'),
+ 'Yusuf', 'Ahmed', 'male', '2011-08-30', '9 Clarendon Park Road', 'Leicester', 'LE2 3AH', 'STUD0017'),
+((SELECT id FROM schools WHERE school_code='ILM2026'), (SELECT id FROM users WHERE username='danielp'),
+ 'Daniel', 'Price', 'male', '2011-01-12', '28 Charnwood Street', 'Leicester', 'LE2 1TB', 'STUD0018');
 
 -- Year 11A
-INSERT INTO students (parent_id, school_id, user_id, first_name, surname, gender, date_of_birth, address1, city, postcode)
+INSERT INTO students (school_id, user_id, first_name, surname, gender, date_of_birth, address1, city, postcode, guardian_code)
 VALUES
-((SELECT id FROM parents WHERE user_id=(SELECT id FROM users WHERE username='reema.patel')), (SELECT id FROM schools WHERE school_code='ILM2026'), (SELECT id FROM users WHERE username='kiranp'),
- 'Kiran', 'Patel', 'female', '2010-09-21', '67 Melton Road', 'Leicester', 'LE4 5EA'),
-((SELECT id FROM parents WHERE user_id=(SELECT id FROM users WHERE username='michael.carter')), (SELECT id FROM schools WHERE school_code='ILM2026'), (SELECT id FROM users WHERE username='isabellec'),
- 'Isabelle', 'Carter', 'female', '2010-03-15', '22 Queens Road', 'Leicester', 'LE2 1TT'),
-((SELECT id FROM parents WHERE user_id=(SELECT id FROM users WHERE username='harpreet.singh')), (SELECT id FROM schools WHERE school_code='ILM2026'), (SELECT id FROM users WHERE username='simrans'),
- 'Simran', 'Singh', 'female', '2010-12-06', '6 Knighton Road', 'Leicester', 'LE2 3HU');
+((SELECT id FROM schools WHERE school_code='ILM2026'), (SELECT id FROM users WHERE username='kiranp'),
+ 'Kiran', 'Patel', 'female', '2010-09-21', '67 Melton Road', 'Leicester', 'LE4 5EA', 'STUD0019'),
+((SELECT id FROM schools WHERE school_code='ILM2026'), (SELECT id FROM users WHERE username='isabellec'),
+ 'Isabelle', 'Carter', 'female', '2010-03-15', '22 Queens Road', 'Leicester', 'LE2 1TT', 'STUD0020'),
+((SELECT id FROM schools WHERE school_code='ILM2026'), (SELECT id FROM users WHERE username='simrans'),
+ 'Simran', 'Singh', 'female', '2010-12-06', '6 Knighton Road', 'Leicester', 'LE2 3HU', 'STUD0021');
 
 -- Greenwood Academy: Year 5 & Year 6
-INSERT INTO students (parent_id, school_id, user_id, first_name, surname, gender, date_of_birth, address1, city, postcode)
+INSERT INTO students (school_id, user_id, first_name, surname, gender, date_of_birth, address1, city, postcode, guardian_code)
 VALUES
-((SELECT id FROM parents WHERE user_id=(SELECT id FROM users WHERE username='helen.turner')), (SELECT id FROM schools WHERE school_code='GRN2026'), (SELECT id FROM users WHERE username='lilyt'),
- 'Lily', 'Turner', 'female', '2016-05-11', '5 Ashby Road', 'Loughborough', 'LE11 3AA'),
-((SELECT id FROM parents WHERE user_id=(SELECT id FROM users WHERE username='samuel.osei-mensah')), (SELECT id FROM schools WHERE school_code='GRN2026'), (SELECT id FROM users WHERE username='graceo'),
- 'Grace', 'Osei-Mensah', 'female', '2016-08-24', '18 Forest Road', 'Loughborough', 'LE11 4TX'),
-((SELECT id FROM parents WHERE user_id=(SELECT id FROM users WHERE username='samuel.osei-mensah')), (SELECT id FROM schools WHERE school_code='GRN2026'), (SELECT id FROM users WHERE username='danielo'),
- 'Daniel', 'Osei-Mensah', 'male', '2015-02-17', '18 Forest Road', 'Loughborough', 'LE11 4TX'),
-((SELECT id FROM parents WHERE user_id=(SELECT id FROM users WHERE username='fatima.zahra')), (SELECT id FROM schools WHERE school_code='GRN2026'), (SELECT id FROM users WHERE username='aliz'),
- 'Ali', 'Zahra', 'male', '2015-06-29', '9 Church Gate', 'Loughborough', 'LE11 1TX');
+((SELECT id FROM schools WHERE school_code='GRN2026'), (SELECT id FROM users WHERE username='lilyt'),
+ 'Lily', 'Turner', 'female', '2016-05-11', '5 Ashby Road', 'Loughborough', 'LE11 3AA', 'STUD0022'),
+((SELECT id FROM schools WHERE school_code='GRN2026'), (SELECT id FROM users WHERE username='graceo'),
+ 'Grace', 'Osei-Mensah', 'female', '2016-08-24', '18 Forest Road', 'Loughborough', 'LE11 4TX', 'STUD0023'),
+((SELECT id FROM schools WHERE school_code='GRN2026'), (SELECT id FROM users WHERE username='danielo'),
+ 'Daniel', 'Osei-Mensah', 'male', '2015-02-17', '18 Forest Road', 'Loughborough', 'LE11 4TX', 'STUD0024'),
+((SELECT id FROM schools WHERE school_code='GRN2026'), (SELECT id FROM users WHERE username='aliz'),
+ 'Ali', 'Zahra', 'male', '2015-06-29', '9 Church Gate', 'Loughborough', 'LE11 1TX', 'STUD0025');
+
+-- ============================
+-- STUDENT ↔ GUARDIAN LINK
+-- Replaces the old students.parent_id single-FK model — see
+-- liquibase/changelog/010-multi-guardian-support.sql. Each seed student
+-- gets one approved guardian here, matched by their unique guardian_code
+-- (rather than re-deriving via user_id, since a student can now have more
+-- than one guardian and this table is the sole source of truth for it).
+-- ============================
+
+INSERT INTO student_guardians (student_id, parent_id, status, approved_at)
+VALUES
+((SELECT id FROM students WHERE guardian_code='STUD0001'), (SELECT id FROM parents WHERE user_id=(SELECT id FROM users WHERE username='parent1')), 'approved', CURRENT_TIMESTAMP),
+((SELECT id FROM students WHERE guardian_code='STUD0002'), (SELECT id FROM parents WHERE user_id=(SELECT id FROM users WHERE username='yusuf.mahmoud')), 'approved', CURRENT_TIMESTAMP),
+((SELECT id FROM students WHERE guardian_code='STUD0003'), (SELECT id FROM parents WHERE user_id=(SELECT id FROM users WHERE username='farida.ahmed')), 'approved', CURRENT_TIMESTAMP),
+((SELECT id FROM students WHERE guardian_code='STUD0004'), (SELECT id FROM parents WHERE user_id=(SELECT id FROM users WHERE username='laura.bennett')), 'approved', CURRENT_TIMESTAMP),
+((SELECT id FROM students WHERE guardian_code='STUD0005'), (SELECT id FROM parents WHERE user_id=(SELECT id FROM users WHERE username='rachel.thompson')), 'approved', CURRENT_TIMESTAMP),
+((SELECT id FROM students WHERE guardian_code='STUD0006'), (SELECT id FROM parents WHERE user_id=(SELECT id FROM users WHERE username='tom.lewis')), 'approved', CURRENT_TIMESTAMP),
+((SELECT id FROM students WHERE guardian_code='STUD0007'), (SELECT id FROM parents WHERE user_id=(SELECT id FROM users WHERE username='kwame.osei')), 'approved', CURRENT_TIMESTAMP),
+((SELECT id FROM students WHERE guardian_code='STUD0008'), (SELECT id FROM parents WHERE user_id=(SELECT id FROM users WHERE username='reema.patel')), 'approved', CURRENT_TIMESTAMP),
+((SELECT id FROM students WHERE guardian_code='STUD0009'), (SELECT id FROM parents WHERE user_id=(SELECT id FROM users WHERE username='karen.bailey')), 'approved', CURRENT_TIMESTAMP),
+((SELECT id FROM students WHERE guardian_code='STUD0010'), (SELECT id FROM parents WHERE user_id=(SELECT id FROM users WHERE username='parent1')), 'approved', CURRENT_TIMESTAMP),
+((SELECT id FROM students WHERE guardian_code='STUD0011'), (SELECT id FROM parents WHERE user_id=(SELECT id FROM users WHERE username='grace.wallace')), 'approved', CURRENT_TIMESTAMP),
+((SELECT id FROM students WHERE guardian_code='STUD0012'), (SELECT id FROM parents WHERE user_id=(SELECT id FROM users WHERE username='amanda.kelly')), 'approved', CURRENT_TIMESTAMP),
+((SELECT id FROM students WHERE guardian_code='STUD0013'), (SELECT id FROM parents WHERE user_id=(SELECT id FROM users WHERE username='yusuf.mahmoud')), 'approved', CURRENT_TIMESTAMP),
+((SELECT id FROM students WHERE guardian_code='STUD0014'), (SELECT id FROM parents WHERE user_id=(SELECT id FROM users WHERE username='bilal.hussain')), 'approved', CURRENT_TIMESTAMP),
+((SELECT id FROM students WHERE guardian_code='STUD0015'), (SELECT id FROM parents WHERE user_id=(SELECT id FROM users WHERE username='elena.novak')), 'approved', CURRENT_TIMESTAMP),
+((SELECT id FROM students WHERE guardian_code='STUD0016'), (SELECT id FROM parents WHERE user_id=(SELECT id FROM users WHERE username='craig.douglas')), 'approved', CURRENT_TIMESTAMP),
+((SELECT id FROM students WHERE guardian_code='STUD0017'), (SELECT id FROM parents WHERE user_id=(SELECT id FROM users WHERE username='farida.ahmed')), 'approved', CURRENT_TIMESTAMP),
+((SELECT id FROM students WHERE guardian_code='STUD0018'), (SELECT id FROM parents WHERE user_id=(SELECT id FROM users WHERE username='susan.price')), 'approved', CURRENT_TIMESTAMP),
+((SELECT id FROM students WHERE guardian_code='STUD0019'), (SELECT id FROM parents WHERE user_id=(SELECT id FROM users WHERE username='reema.patel')), 'approved', CURRENT_TIMESTAMP),
+((SELECT id FROM students WHERE guardian_code='STUD0020'), (SELECT id FROM parents WHERE user_id=(SELECT id FROM users WHERE username='michael.carter')), 'approved', CURRENT_TIMESTAMP),
+((SELECT id FROM students WHERE guardian_code='STUD0021'), (SELECT id FROM parents WHERE user_id=(SELECT id FROM users WHERE username='harpreet.singh')), 'approved', CURRENT_TIMESTAMP),
+((SELECT id FROM students WHERE guardian_code='STUD0022'), (SELECT id FROM parents WHERE user_id=(SELECT id FROM users WHERE username='helen.turner')), 'approved', CURRENT_TIMESTAMP),
+((SELECT id FROM students WHERE guardian_code='STUD0023'), (SELECT id FROM parents WHERE user_id=(SELECT id FROM users WHERE username='samuel.osei-mensah')), 'approved', CURRENT_TIMESTAMP),
+((SELECT id FROM students WHERE guardian_code='STUD0024'), (SELECT id FROM parents WHERE user_id=(SELECT id FROM users WHERE username='samuel.osei-mensah')), 'approved', CURRENT_TIMESTAMP),
+((SELECT id FROM students WHERE guardian_code='STUD0025'), (SELECT id FROM parents WHERE user_id=(SELECT id FROM users WHERE username='fatima.zahra')), 'approved', CURRENT_TIMESTAMP);
+
+-- Demo second guardian: Adam Khan (STUD0001) also has his father as an
+-- independent second login, proving the multi-guardian feature end to end
+-- in seed data — both parent1 (mother) and parent2 (father) can log in
+-- separately and see Adam.
+INSERT INTO users (username, email, password_hash, role_id, school_id)
+VALUES
+('parent2', 'imran.khan@example.com', '$2a$10$HdcMkFwYY5bPIOGHZ4atAux5XlH.c5Vmx4tG21lUhHYpm0853rM0S', (SELECT id FROM roles WHERE name='parent'), (SELECT id FROM schools WHERE school_code='ILM2026'));
+
+INSERT INTO parents (user_id, school_id, first_name, surname, relationship_to_student, date_of_birth, address1, city, postcode, contact_number, email)
+VALUES
+((SELECT id FROM users WHERE username='parent2'), (SELECT id FROM schools WHERE school_code='ILM2026'),
+ 'Imran', 'Khan', 'father', '1982-02-14', '3 Birstall Road', 'Leicester', 'LE4 3BJ', '07700900199', 'imran.khan@example.com');
+
+INSERT INTO student_guardians (student_id, parent_id, status, approved_at)
+VALUES
+((SELECT id FROM students WHERE guardian_code='STUD0001'), (SELECT id FROM parents WHERE user_id=(SELECT id FROM users WHERE username='parent2')), 'approved', CURRENT_TIMESTAMP);
 
 -- ============================
 -- STUDENT ↔ CLASS LINK
@@ -390,15 +455,22 @@ VALUES
 -- ============================
 -- SCHOOL FEATURE FLAG OVERRIDES
 -- ============================
--- Ilm School (established, larger) has attendance reporting and
--- notifications switched on; Greenwood Academy (newer, smaller) is still
--- on the platform defaults, to demonstrate the per-school override.
+-- Ilm School (established, larger) has every feature switched on;
+-- Greenwood Academy (newer, smaller) is still on the platform defaults
+-- (all off) — the E2E suite relies on this split to cover both a
+-- feature's enabled and disabled state without any runtime setup step.
 
 INSERT INTO school_feature_flags (school_id, feature_flag_id, enabled)
 VALUES
 ((SELECT id FROM schools WHERE school_code='ILM2026'), (SELECT id FROM feature_flags WHERE feature_key='attendance_report'), TRUE),
 ((SELECT id FROM schools WHERE school_code='ILM2026'), (SELECT id FROM feature_flags WHERE feature_key='notifications'), TRUE),
-((SELECT id FROM schools WHERE school_code='ILM2026'), (SELECT id FROM feature_flags WHERE feature_key='student_notes'), TRUE);
+((SELECT id FROM schools WHERE school_code='ILM2026'), (SELECT id FROM feature_flags WHERE feature_key='student_notes'), TRUE),
+((SELECT id FROM schools WHERE school_code='ILM2026'), (SELECT id FROM feature_flags WHERE feature_key='report_cards'), TRUE),
+((SELECT id FROM schools WHERE school_code='ILM2026'), (SELECT id FROM feature_flags WHERE feature_key='timetable'), TRUE),
+((SELECT id FROM schools WHERE school_code='ILM2026'), (SELECT id FROM feature_flags WHERE feature_key='analytics_dashboard'), TRUE),
+((SELECT id FROM schools WHERE school_code='ILM2026'), (SELECT id FROM feature_flags WHERE feature_key='fees'), TRUE),
+((SELECT id FROM schools WHERE school_code='ILM2026'), (SELECT id FROM feature_flags WHERE feature_key='password_management'), TRUE),
+((SELECT id FROM schools WHERE school_code='ILM2026'), (SELECT id FROM feature_flags WHERE feature_key='direct_debit'), TRUE);
 
 -- ============================
 -- STUDENT NOTES
@@ -427,6 +499,51 @@ VALUES
 ((SELECT id FROM classes WHERE class_code='11A'),
  (SELECT id FROM students WHERE first_name='Kiran'),
  'Maths: 1-to-1 Revision Set', 'Extra trigonometry questions to reinforce this week''s catch-up session.', '2026-09-26');
+
+-- ============================
+-- REPORT CARDS
+-- ============================
+
+INSERT INTO school_terms (school_id, name, start_date, end_date)
+VALUES
+((SELECT id FROM schools WHERE school_code='ILM2026'), 'Term 1 2025-26', '2025-09-01', '2025-12-19'),
+((SELECT id FROM schools WHERE school_code='ILM2026'), 'Term 2 2025-26', '2026-01-05', '2026-04-03');
+
+INSERT INTO report_cards (student_id, term_id, created_by_user_id)
+VALUES
+((SELECT id FROM students WHERE first_name='Adam' AND surname='Khan'),
+ (SELECT id FROM school_terms WHERE name='Term 1 2025-26'),
+ (SELECT id FROM users WHERE username='teacher1'));
+
+INSERT INTO report_card_subjects (report_card_id, subject_name, grade, comment)
+VALUES
+((SELECT id FROM report_cards WHERE student_id = (SELECT id FROM students WHERE first_name='Adam' AND surname='Khan')),
+ 'Maths', 'A', 'Consistently strong problem-solving, especially in algebra.'),
+((SELECT id FROM report_cards WHERE student_id = (SELECT id FROM students WHERE first_name='Adam' AND surname='Khan')),
+ 'English', 'B+', 'Good written work; would benefit from speaking up more in group discussions.'),
+((SELECT id FROM report_cards WHERE student_id = (SELECT id FROM students WHERE first_name='Adam' AND surname='Khan')),
+ 'Science', 'A-', 'Enthusiastic in practicals, keep up the detailed lab write-ups.');
+
+-- ============================
+-- TIMETABLE
+-- ============================
+-- term_id is derived from slot_date (whichever term's date range contains
+-- it) rather than chosen — this seed data just picks dates that already
+-- fall inside the terms above.
+
+INSERT INTO timetable_slots (class_id, term_id, slot_date, start_time, end_time, subject_name, teacher_id)
+VALUES
+((SELECT id FROM classes WHERE class_code='7A'), (SELECT id FROM school_terms WHERE name='Term 1 2025-26'), '2025-09-08', '09:00:00', '10:00:00', 'Maths', (SELECT id FROM users WHERE username='teacher1')),
+((SELECT id FROM classes WHERE class_code='7A'), (SELECT id FROM school_terms WHERE name='Term 1 2025-26'), '2025-09-08', '10:00:00', '11:00:00', 'English', (SELECT id FROM users WHERE username='teacher1')),
+((SELECT id FROM classes WHERE class_code='7A'), (SELECT id FROM school_terms WHERE name='Term 1 2025-26'), '2025-09-10', '09:00:00', '10:00:00', 'Science', (SELECT id FROM users WHERE username='teacher1')),
+((SELECT id FROM classes WHERE class_code='7A'), (SELECT id FROM school_terms WHERE name='Term 2 2025-26'), '2026-01-12', '09:00:00', '10:00:00', 'English', (SELECT id FROM users WHERE username='teacher1'));
+
+INSERT INTO school_events (school_id, title, description, event_date, start_time, end_time, created_by_user_id)
+VALUES
+((SELECT id FROM schools WHERE school_code='ILM2026'), 'INSET Day', 'Staff training day — no lessons for students.', '2026-09-04', NULL, NULL,
+ (SELECT id FROM users WHERE username='admin1')),
+((SELECT id FROM schools WHERE school_code='ILM2026'), 'Parents'' Evening', 'Book a slot via the school office.', '2026-10-15', '16:00:00', '19:00:00',
+ (SELECT id FROM users WHERE username='admin1'));
 
 -- ============================
 -- NOTIFICATIONS
@@ -460,7 +577,7 @@ WHERE username IN ('owner1','admin1','maintainer1','teacher1','e.clarke');
 INSERT INTO notification_recipients (notification_id, user_id, read_at)
 SELECT 2, id, NULL
 FROM users
-WHERE username IN ('r.nguyen','a.rahman','m.sullivan');
+WHERE username IN ('r.nguyen','a.rahman','m.sullivan','treasurer1');
 
 -- Parents' Evening (parent) — most recent, mostly unread
 INSERT INTO notification_recipients (notification_id, user_id, read_at)
@@ -504,14 +621,22 @@ VALUES
 ((SELECT id FROM users WHERE username='samuel.ojo'), (SELECT id FROM schools WHERE school_code='ILM2026'),
  'Samuel', 'Ojo', 'Male', '26 St Saviours Road', 'Leicester', 'LE5 3HB', 'samuel.ojo@example.com', '07700900302');
 
-INSERT INTO students (parent_id, school_id, first_name, surname, gender, date_of_birth, address1, city, postcode)
+INSERT INTO students (school_id, first_name, surname, gender, date_of_birth, address1, city, postcode, guardian_code)
 VALUES
-((SELECT id FROM parents WHERE user_id=(SELECT id FROM users WHERE username='nicole.adeyemi')), (SELECT id FROM schools WHERE school_code='ILM2026'),
- 'Tobi', 'Adeyemi', 'male', '2013-04-02', '11 Beaumont Leys Lane', 'Leicester', 'LE4 2BN'),
-((SELECT id FROM parents WHERE user_id=(SELECT id FROM users WHERE username='naomi.fletcher')), (SELECT id FROM schools WHERE school_code='GRN2026'),
- 'Ella', 'Fletcher', 'female', '2016-03-19', '14 Ashby Road', 'Loughborough', 'LE11 3AA');
+((SELECT id FROM schools WHERE school_code='ILM2026'),
+ 'Tobi', 'Adeyemi', 'male', '2013-04-02', '11 Beaumont Leys Lane', 'Leicester', 'LE4 2BN', 'STUD0026'),
+((SELECT id FROM schools WHERE school_code='GRN2026'),
+ 'Ella', 'Fletcher', 'female', '2016-03-19', '14 Ashby Road', 'Loughborough', 'LE11 3AA', 'STUD0027');
+
+-- Even though the parent user account is still pending approval, the
+-- underlying student + guardian link is created at registration time
+-- (matching how register-parent actually behaves) — only login is gated.
+INSERT INTO student_guardians (student_id, parent_id, status, approved_at)
+VALUES
+((SELECT id FROM students WHERE guardian_code='STUD0026'), (SELECT id FROM parents WHERE user_id=(SELECT id FROM users WHERE username='nicole.adeyemi')), 'approved', CURRENT_TIMESTAMP),
+((SELECT id FROM students WHERE guardian_code='STUD0027'), (SELECT id FROM parents WHERE user_id=(SELECT id FROM users WHERE username='naomi.fletcher')), 'approved', CURRENT_TIMESTAMP);
 
 INSERT INTO student_classes (student_id, class_id)
 VALUES
-((SELECT id FROM students WHERE first_name='Tobi'), (SELECT id FROM classes WHERE class_code='8A')),
-((SELECT id FROM students WHERE first_name='Ella'), (SELECT id FROM classes WHERE class_code='5Y'));
+((SELECT id FROM students WHERE guardian_code='STUD0026'), (SELECT id FROM classes WHERE class_code='8A')),
+((SELECT id FROM students WHERE guardian_code='STUD0027'), (SELECT id FROM classes WHERE class_code='5Y'));

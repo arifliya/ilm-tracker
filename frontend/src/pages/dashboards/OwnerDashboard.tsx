@@ -10,6 +10,8 @@ import { formatDate } from "../../utils/formatDate";
 import { getErrorMessage } from "../../utils/getErrorMessage";
 import { downloadCsv } from "../../utils/downloadCsv";
 import { usePolling } from "../../hooks/usePolling";
+import LineChart from "../../components/charts/LineChart";
+import BarChart from "../../components/charts/BarChart";
 
 const PAGE_SIZE = 5;
 const POLL_INTERVAL_MS = 30000;
@@ -17,7 +19,19 @@ const POLL_INTERVAL_MS = 30000;
 const todayStr = () => new Date().toISOString().slice(0, 10);
 const oneYearAgoStr = () => new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
 
-type SectionKey = "dashboard" | "class" | "teacher" | "sp" | "approvals" | "remove" | "users" | "report" | "notifications";
+type SectionKey =
+  | "dashboard"
+  | "class"
+  | "teacher"
+  | "sp"
+  | "approvals"
+  | "remove"
+  | "users"
+  | "report"
+  | "notifications"
+  | "timetable"
+  | "analytics"
+  | "passwordManagement";
 
 const BASE_NAV_ITEMS: DashboardNavItem[] = [
   { key: "dashboard", icon: "🏠", label: "Dashboard" },
@@ -38,13 +52,63 @@ const SECTION_TITLES: Record<SectionKey, string> = {
   remove: "Remove Users",
   users: "All Users",
   report: "Attendance Report",
-  notifications: "Notifications"
+  notifications: "Notifications",
+  timetable: "Timetable",
+  analytics: "Analytics",
+  passwordManagement: "Password Management"
 };
 
 interface RoleItem {
   id: number;
   name: string;
 }
+
+interface Term {
+  id: number;
+  name: string;
+  start_date: string;
+  end_date: string;
+}
+
+interface AnalyticsData {
+  attendanceTrend: {
+    range: "term" | "year";
+    rangeStart: string;
+    rangeEnd: string;
+    termName: string | null;
+    points: { date: string; rate: number | null }[];
+  };
+  studentsPerClass: { classId: number; className: string; studentCount: number }[];
+}
+
+interface SchoolEvent {
+  id: number;
+  title: string;
+  description: string | null;
+  event_date: string;
+  start_time: string | null;
+  end_time: string | null;
+}
+
+interface TimetableSlot {
+  id: number;
+  term_id: number;
+  term_name?: string;
+  slot_date: string;
+  start_time: string;
+  end_time: string;
+  subject_name: string | null;
+  teacher_id: number | null;
+  teacher_first_name: string;
+  teacher_surname: string;
+}
+
+interface CalendarSlot extends TimetableSlot {
+  class_id: number;
+  class_name: string;
+}
+
+const emptySlotForm = () => ({ slot_date: "", start_time: "", end_time: "", subject_name: "", teacher_id: "" });
 
 const OwnerDashboard: React.FC = () => {
   const [classes, setClasses] = useState<any[]>([]);
@@ -73,6 +137,9 @@ const OwnerDashboard: React.FC = () => {
 
   const [parents, setParents] = useState<any[]>([]);
   const [searchRemoveParents, setSearchRemoveParents] = useState("");
+
+  const [guardianRequests, setGuardianRequests] = useState<any[]>([]);
+  const [assignGuardianParentId, setAssignGuardianParentId] = useState<Record<number, string>>({});
 
   const [search, setSearch] = useState({
     class: "",
@@ -112,24 +179,58 @@ const OwnerDashboard: React.FC = () => {
   const [sentNotifications, setSentNotifications] = useState<any[]>([]);
   const [myNotifications, setMyNotifications] = useState<any[]>([]);
 
+  const [events, setEvents] = useState<SchoolEvent[]>([]);
+  const [newEvent, setNewEvent] = useState({ title: "", description: "", event_date: "", start_time: "", end_time: "" });
+
+  const [scheduleTerms, setScheduleTerms] = useState<Term[]>([]);
+  const [newScheduleTerm, setNewScheduleTerm] = useState({ name: "", start_date: "", end_date: "" });
+  const [expandedTermId, setExpandedTermId] = useState<number | null>(null);
+  const [expandedTermSlots, setExpandedTermSlots] = useState<CalendarSlot[]>([]);
+  const [expandedTermSlotsLoading, setExpandedTermSlotsLoading] = useState(false);
+
+  const [attendanceRange, setAttendanceRange] = useState<"term" | "year">("term");
+  const [analyticsData, setAnalyticsData] = useState<AnalyticsData | null>(null);
+  const [analyticsLoading, setAnalyticsLoading] = useState(false);
+
+  const [timetableClassId, setTimetableClassId] = useState("");
+  const [timetableSlots, setTimetableSlots] = useState<TimetableSlot[]>([]);
+  const [timetableSlotsLoading, setTimetableSlotsLoading] = useState(false);
+  const [editingSlotId, setEditingSlotId] = useState<number | null>(null);
+  const [slotForm, setSlotForm] = useState(emptySlotForm());
+
   const { confirm, ConfirmDialog } = useConfirm();
 
   const loadAll = async () => {
     try {
-      const [classRes, teacherRes, spRes, pendingRes, assignedRes, allUsersRes, rolesRes, featuresRes, parentsRes, sentNotificationsRes, myNotificationsRes] =
-        await Promise.all([
-          api.get("/admin/classes"),
-          api.get("/admin/teachers"),
-          api.get("/admin/students-parents"),
-          api.get("/admin/pending-users"),
-          api.get("/admin/assigned-students"),
-          api.get("/admin/users-all"),
-          api.get("/admin/roles"),
-          api.get("/features"),
-          api.get("/admin/parents"),
-          api.get("/notifications/sent"),
-          api.get("/notifications")
-        ]);
+      const [
+        classRes,
+        teacherRes,
+        spRes,
+        pendingRes,
+        assignedRes,
+        allUsersRes,
+        rolesRes,
+        featuresRes,
+        parentsRes,
+        sentNotificationsRes,
+        myNotificationsRes,
+        eventsRes,
+        guardianRequestsRes
+      ] = await Promise.all([
+        api.get("/admin/classes"),
+        api.get("/admin/teachers"),
+        api.get("/admin/students-parents"),
+        api.get("/admin/pending-users"),
+        api.get("/admin/assigned-students"),
+        api.get("/admin/users-all"),
+        api.get("/admin/roles"),
+        api.get("/features"),
+        api.get("/admin/parents"),
+        api.get("/notifications/sent"),
+        api.get("/notifications"),
+        api.get("/timetable/events"),
+        api.get("/admin/guardian-requests")
+      ]);
 
       setClasses(classRes.data || []);
       setTeachers(teacherRes.data || []);
@@ -146,6 +247,8 @@ const OwnerDashboard: React.FC = () => {
       );
       setFeatures(featuresRes.data?.flags || {});
       setParents(parentsRes.data || []);
+      setEvents(eventsRes.data.events || []);
+      setGuardianRequests(guardianRequestsRes.data || []);
       setLoadError(null);
     } catch (err) {
       console.error("Failed to load owner data", err);
@@ -158,6 +261,81 @@ const OwnerDashboard: React.FC = () => {
   }, []);
 
   usePolling(loadAll, POLL_INTERVAL_MS);
+
+  const loadScheduleTerms = async () => {
+    try {
+      const res = await api.get("/timetable/terms");
+      setScheduleTerms(res.data.terms || []);
+    } catch (err) {
+      console.error("Load schedule terms error:", err);
+      setLoadError(getErrorMessage(err, "Failed to load terms"));
+    }
+  };
+
+  const createScheduleTerm = async (e: React.FormEvent) => {
+    e.preventDefault();
+
+    try {
+      await api.post("/timetable/terms", newScheduleTerm);
+      setNewScheduleTerm({ name: "", start_date: "", end_date: "" });
+      const res = await api.get("/timetable/terms");
+      setScheduleTerms(res.data.terms || []);
+      setSuccessMessage("Term created successfully.");
+    } catch (err) {
+      console.error("Create schedule term error:", err);
+      setLoadError(getErrorMessage(err, "Failed to create term"));
+    }
+  };
+
+  const toggleTermExpand = async (termId: number) => {
+    if (expandedTermId === termId) {
+      setExpandedTermId(null);
+      setExpandedTermSlots([]);
+      return;
+    }
+
+    setExpandedTermId(termId);
+    setExpandedTermSlots([]);
+    setExpandedTermSlotsLoading(true);
+    try {
+      const res = await api.get("/timetable/slots", { params: { term_id: termId } });
+      setExpandedTermSlots(res.data.slots || []);
+    } catch (err) {
+      console.error("Load term schedule error:", err);
+      setLoadError(getErrorMessage(err, "Failed to load this term's schedule"));
+    } finally {
+      setExpandedTermSlotsLoading(false);
+    }
+  };
+
+  // Fetched on-demand rather than in loadAll: gated by the timetable flag,
+  // and loadAll runs unconditionally on every dashboard load — fetching
+  // it there would 403 the whole dashboard for any school that hasn't
+  // turned the flag on yet.
+  useEffect(() => {
+    if (selectedSection === "timetable" && features.timetable) {
+      loadScheduleTerms();
+    }
+  }, [selectedSection, features.timetable]);
+
+  const loadAnalytics = async (range: "term" | "year") => {
+    setAnalyticsLoading(true);
+    try {
+      const res = await api.get("/admin/analytics", { params: { range } });
+      setAnalyticsData(res.data);
+    } catch (err) {
+      console.error("Load analytics error:", err);
+      setLoadError(getErrorMessage(err, "Failed to load analytics"));
+    } finally {
+      setAnalyticsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (selectedSection === "analytics" && features.analytics_dashboard) {
+      loadAnalytics(attendanceRange);
+    }
+  }, [selectedSection, features.analytics_dashboard, attendanceRange]);
 
   const createClass = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -254,6 +432,119 @@ const OwnerDashboard: React.FC = () => {
     }
   };
 
+  const createEvent = async (e: React.FormEvent) => {
+    e.preventDefault();
+
+    try {
+      await api.post("/timetable/events", {
+        title: newEvent.title,
+        description: newEvent.description || undefined,
+        event_date: newEvent.event_date,
+        start_time: newEvent.start_time || undefined,
+        end_time: newEvent.end_time || undefined
+      });
+
+      setNewEvent({ title: "", description: "", event_date: "", start_time: "", end_time: "" });
+      const res = await api.get("/timetable/events");
+      setEvents(res.data.events || []);
+      setSuccessMessage("Event created successfully.");
+    } catch (err) {
+      console.error("Create event error:", err);
+      setLoadError(getErrorMessage(err, "Failed to create event"));
+    }
+  };
+
+  const deleteEvent = async (id: number) => {
+    if (!(await confirm("Are you sure you want to delete this event?"))) return;
+
+    try {
+      await api.delete(`/timetable/events/${id}`);
+      setEvents(prev => prev.filter(e => e.id !== id));
+      setSuccessMessage("Event deleted successfully.");
+    } catch (err) {
+      console.error("Delete event error:", err);
+      setLoadError(getErrorMessage(err, "Failed to delete event"));
+    }
+  };
+
+  const loadTimetableSlots = async (classId: string) => {
+    setTimetableClassId(classId);
+    setTimetableSlots([]);
+    setEditingSlotId(null);
+    setSlotForm(emptySlotForm());
+    if (!classId) return;
+
+    setTimetableSlotsLoading(true);
+    try {
+      const res = await api.get(`/timetable/classes/${classId}/slots`);
+      setTimetableSlots(res.data.slots || []);
+    } catch (err) {
+      console.error("Load timetable slots error:", err);
+      setLoadError(getErrorMessage(err, "Failed to load timetable"));
+    } finally {
+      setTimetableSlotsLoading(false);
+    }
+  };
+
+  const startEditSlot = (slot: TimetableSlot) => {
+    setEditingSlotId(slot.id);
+    setSlotForm({
+      slot_date: slot.slot_date.slice(0, 10),
+      start_time: slot.start_time.slice(0, 5),
+      end_time: slot.end_time.slice(0, 5),
+      subject_name: slot.subject_name || "",
+      teacher_id: slot.teacher_id ? String(slot.teacher_id) : ""
+    });
+  };
+
+  const cancelEditSlot = () => {
+    setEditingSlotId(null);
+    setSlotForm(emptySlotForm());
+  };
+
+  const submitSlot = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!timetableClassId) return;
+
+    const body = {
+      slot_date: slotForm.slot_date,
+      start_time: slotForm.start_time,
+      end_time: slotForm.end_time,
+      subject_name: slotForm.subject_name.trim() || undefined,
+      teacher_id: slotForm.teacher_id ? Number(slotForm.teacher_id) : undefined
+    };
+
+    try {
+      if (editingSlotId) {
+        await api.put(`/timetable/slots/${editingSlotId}`, body);
+        setSuccessMessage("Timetable slot updated.");
+      } else {
+        await api.post(`/timetable/classes/${timetableClassId}/slots`, body);
+        setSuccessMessage("Timetable slot created.");
+      }
+      const res = await api.get(`/timetable/classes/${timetableClassId}/slots`);
+      setTimetableSlots(res.data.slots || []);
+      cancelEditSlot();
+    } catch (err) {
+      console.error("Save timetable slot error:", err);
+      setLoadError(getErrorMessage(err, "Failed to save timetable slot"));
+    }
+  };
+
+  const deleteSlot = async (id: number) => {
+    if (!(await confirm("Are you sure you want to delete this timetable slot?"))) return;
+
+    try {
+      await api.delete(`/timetable/slots/${id}`);
+      setTimetableSlots(prev => prev.filter(s => s.id !== id));
+      setSuccessMessage("Timetable slot deleted.");
+      if (editingSlotId === id) cancelEditSlot();
+    } catch (err) {
+      console.error("Delete timetable slot error:", err);
+      setLoadError(getErrorMessage(err, "Failed to delete timetable slot"));
+    }
+  };
+
   const assignTeacher = async (e: React.FormEvent) => {
     e.preventDefault();
 
@@ -314,9 +605,17 @@ const OwnerDashboard: React.FC = () => {
     }
 
     try {
-      await api.post(`/admin/approve/${userId}`, { role });
+      const res = await api.post(`/admin/approve/${userId}`, { role });
       loadAll();
-      setSuccessMessage("User approved successfully.");
+      const studentAccounts = res.data.studentAccounts || [];
+      if (studentAccounts.length > 0) {
+        const creds = studentAccounts
+          .map((s: any) => `${s.name} — username: ${s.username}, one-time password: ${s.temporaryPassword}`)
+          .join("; ");
+        setSuccessMessage(`User approved successfully. Student login(s) created: ${creds} — share these directly, they won't be shown again.`);
+      } else {
+        setSuccessMessage("User approved successfully.");
+      }
     } catch (err) {
       console.error("Approve user error:", err);
       setLoadError(getErrorMessage(err, "Failed to approve user"));
@@ -359,6 +658,87 @@ const OwnerDashboard: React.FC = () => {
     } catch (err) {
       console.error("Remove parent error:", err);
       setLoadError(getErrorMessage(err, "Failed to remove parent"));
+    }
+  };
+
+  const handleResetPassword = async (userId: number, label: string) => {
+    if (!(await confirm(`Reset ${label}'s password? A new one-time password will be generated.`))) return;
+
+    try {
+      const res = await api.post(`/admin/users/${userId}/reset-password`);
+      setSuccessMessage(
+        `Password reset for ${label}. One-time password: ${res.data.temporaryPassword} — share this with them directly, it won't be shown again.`
+      );
+    } catch (err) {
+      console.error("Reset password error:", err);
+      setLoadError(getErrorMessage(err, "Failed to reset password"));
+    }
+  };
+
+  const handleGenerateStudentLogin = async (studentId: number, label: string) => {
+    if (!(await confirm(`Generate a login for ${label}? A one-time password will be created.`))) return;
+
+    try {
+      const res = await api.post(`/admin/students/${studentId}/generate-login`);
+      setSuccessMessage(
+        `Login created for ${label}. Username: ${res.data.username}. One-time password: ${res.data.temporaryPassword} — share this with them directly, it won't be shown again.`
+      );
+      await loadAll();
+    } catch (err) {
+      console.error("Generate student login error:", err);
+      setLoadError(getErrorMessage(err, "Failed to generate login"));
+    }
+  };
+
+  const assignGuardian = async (studentId: number) => {
+    const parentId = assignGuardianParentId[studentId];
+    if (!parentId) return;
+
+    try {
+      await api.post(`/admin/students/${studentId}/assign-guardian`, { parent_id: Number(parentId) });
+      setAssignGuardianParentId(prev => ({ ...prev, [studentId]: "" }));
+      await loadAll();
+      setSuccessMessage("Guardian assigned.");
+    } catch (err) {
+      console.error("Assign guardian error:", err);
+      setLoadError(getErrorMessage(err, "Failed to assign guardian"));
+    }
+  };
+
+  const removeGuardian = async (studentId: number, parentId: number) => {
+    if (!(await confirm("Remove this guardian from the student?"))) return;
+
+    try {
+      await api.post(`/admin/students/${studentId}/remove-guardian`, { parent_id: parentId });
+      await loadAll();
+      setSuccessMessage("Guardian removed.");
+    } catch (err) {
+      console.error("Remove guardian error:", err);
+      setLoadError(getErrorMessage(err, "Failed to remove guardian"));
+    }
+  };
+
+  const approveGuardianRequest = async (studentId: number, parentId: number) => {
+    try {
+      await api.post("/admin/guardian-requests/approve", { student_id: studentId, parent_id: parentId });
+      await loadAll();
+      setSuccessMessage("Guardian request approved.");
+    } catch (err) {
+      console.error("Approve guardian request error:", err);
+      setLoadError(getErrorMessage(err, "Failed to approve guardian request"));
+    }
+  };
+
+  const rejectGuardianRequest = async (studentId: number, parentId: number) => {
+    if (!(await confirm("Reject this guardian link request?"))) return;
+
+    try {
+      await api.post("/admin/guardian-requests/reject", { student_id: studentId, parent_id: parentId });
+      await loadAll();
+      setSuccessMessage("Guardian request rejected.");
+    } catch (err) {
+      console.error("Reject guardian request error:", err);
+      setLoadError(getErrorMessage(err, "Failed to reject guardian request"));
     }
   };
 
@@ -453,6 +833,15 @@ const OwnerDashboard: React.FC = () => {
     : BASE_NAV_ITEMS;
   if (features.notifications) {
     navItems = [...navItems, { key: "notifications", icon: "📣", label: "Notifications" }];
+  }
+  if (features.timetable) {
+    navItems = [...navItems, { key: "timetable", icon: "🗓️", label: "Timetable" }];
+  }
+  if (features.analytics_dashboard) {
+    navItems = [...navItems, { key: "analytics", icon: "📈", label: "Analytics" }];
+  }
+  if (features.password_management) {
+    navItems = [...navItems, { key: "passwordManagement", icon: "🔑", label: "Password Management" }];
   }
 
   return (
@@ -1272,28 +1661,121 @@ const OwnerDashboard: React.FC = () => {
                                     color: "#4c1d95"
                                   }}
                                 >
-                                  Parent Details
+                                  Guardian Code
                                 </h4>
+                                <div>{row.student_guardian_code || "—"}</div>
+                              </div>
 
-                                <div>
-                                  <strong>Name:</strong>{" "}
-                                  {row.parent_first_name}{" "}
-                                  {row.parent_last_name}
+                              {features.password_management && (
+                                <>
+                                  <hr style={{ margin: "20px 0" }} />
+                                  <div>
+                                    <h4
+                                      style={{
+                                        fontSize: 18,
+                                        marginBottom: 10,
+                                        color: "#4c1d95"
+                                      }}
+                                    >
+                                      Login
+                                    </h4>
+                                    {row.student_user_id ? (
+                                      <button
+                                        style={styles.secondaryBtn}
+                                        onClick={() =>
+                                          handleResetPassword(row.student_user_id, `${row.student_first_name} ${row.student_last_name}`)
+                                        }
+                                      >
+                                        Reset Password
+                                      </button>
+                                    ) : (
+                                      <button
+                                        style={styles.secondaryBtn}
+                                        onClick={() =>
+                                          handleGenerateStudentLogin(studentId, `${row.student_first_name} ${row.student_last_name}`)
+                                        }
+                                      >
+                                        Generate Login
+                                      </button>
+                                    )}
+                                  </div>
+                                </>
+                              )}
+
+                              <hr style={{ margin: "20px 0" }} />
+
+                              {(row.guardians || []).map((g: any, gIdx: number) => (
+                                <div key={g.parent_id} style={{ marginBottom: 16 }}>
+                                  <h4
+                                    style={{
+                                      fontSize: 18,
+                                      marginBottom: 10,
+                                      color: "#4c1d95",
+                                      display: "flex",
+                                      justifyContent: "space-between",
+                                      alignItems: "center"
+                                    }}
+                                  >
+                                    Guardian {gIdx + 1}
+                                    {(row.guardians || []).length > 1 && (
+                                      <button
+                                        style={{ ...styles.secondaryBtn, background: "#dc2626", color: "#fff" }}
+                                        onClick={() => removeGuardian(studentId, g.parent_id)}
+                                      >
+                                        Remove
+                                      </button>
+                                    )}
+                                  </h4>
+
+                                  <div>
+                                    <strong>Name:</strong> {g.first_name} {g.surname}
+                                  </div>
+                                  <div>
+                                    <strong>Email:</strong> {g.email}
+                                  </div>
+                                  <div>
+                                    <strong>Relationship:</strong> {g.relationship_to_student || "—"}
+                                  </div>
+                                  <div>
+                                    <strong>Phone Number:</strong> {g.contact_number || "—"}
+                                  </div>
+                                  <div>
+                                    <strong>Medical Notes:</strong> {g.medical_condition || "—"}
+                                  </div>
                                 </div>
-                                <div>
-                                  <strong>Email:</strong> {row.parent_email}
-                                </div>
-                                <div>
-                                  <strong>Relationship:</strong>{" "}
-                                  {row.parent_relationship || "—"}
-                                </div>
-                                <div>
-                                  <strong>Phone Number:</strong>{" "}
-                                  {row.parent_contact_number || "—"}
-                                </div>
-                                <div>
-                                  <strong>Medical Notes:</strong>{" "}
-                                  {row.parent_medical_condition || "—"}
+                              ))}
+
+                              <hr style={{ margin: "20px 0" }} />
+
+                              <div>
+                                <h4 style={{ fontSize: 16, marginBottom: 8, color: "#4c1d95" }}>
+                                  Assign Another Guardian
+                                </h4>
+                                <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                                  <select
+                                    style={styles.input}
+                                    value={assignGuardianParentId[studentId] || ""}
+                                    onChange={e =>
+                                      setAssignGuardianParentId(prev => ({ ...prev, [studentId]: e.target.value }))
+                                    }
+                                  >
+                                    <option value="">Select an existing parent...</option>
+                                    {parents
+                                      .filter((p: any) => p.parent_school_id === row.student_school_id)
+                                      .filter((p: any) => !(row.guardians || []).some((g: any) => g.parent_id === p.parent_id))
+                                      .map((p: any) => (
+                                        <option key={p.parent_id} value={p.parent_id}>
+                                          {p.parent_first_name} {p.parent_last_name}
+                                        </option>
+                                      ))}
+                                  </select>
+                                  <button
+                                    style={styles.actionBtn}
+                                    disabled={!assignGuardianParentId[studentId]}
+                                    onClick={() => assignGuardian(studentId)}
+                                  >
+                                    Assign
+                                  </button>
                                 </div>
                               </div>
                             </div>
@@ -1489,6 +1971,58 @@ const OwnerDashboard: React.FC = () => {
               }
             />
           </div>
+
+          <div style={styles.card}>
+            <h3 style={{ marginBottom: 16 }}>Guardian Requests</h3>
+            <p style={{ ...styles.text, fontSize: 13, color: "#64748b" }}>
+              Self-service requests from an already-approved parent asking to link as an additional
+              guardian on a child that isn't theirs yet.
+            </p>
+
+            {guardianRequests.length === 0 ? (
+              <p style={styles.text}>No pending guardian requests.</p>
+            ) : (
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ ...styles.table, width: "100%" }}>
+                  <thead>
+                    <tr>
+                      <th style={{ textAlign: "left" }}>Student</th>
+                      <th style={{ textAlign: "left" }}>Requesting Parent</th>
+                      <th style={{ textAlign: "left" }}>Email</th>
+                      <th style={{ textAlign: "center", width: 180 }}>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {guardianRequests.map((r: any) => (
+                      <tr key={`${r.student_id}-${r.parent_id}`}>
+                        <td>
+                          {r.student_first_name} {r.student_last_name}
+                        </td>
+                        <td>
+                          {r.parent_first_name} {r.parent_last_name}
+                        </td>
+                        <td>{r.parent_email}</td>
+                        <td style={{ textAlign: "center" }}>
+                          <button
+                            style={{ ...styles.secondaryBtn, marginRight: 6 }}
+                            onClick={() => approveGuardianRequest(r.student_id, r.parent_id)}
+                          >
+                            Approve
+                          </button>
+                          <button
+                            style={{ ...styles.secondaryBtn, background: "#dc2626", color: "#fff" }}
+                            onClick={() => rejectGuardianRequest(r.student_id, r.parent_id)}
+                          >
+                            Reject
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
         </div>
       )}
 
@@ -1583,13 +2117,14 @@ const OwnerDashboard: React.FC = () => {
 
               <tbody>
                 {studentsParents
-                  .filter((row: any) =>
-                    (
-                      `${row.student_first_name} ${row.student_last_name} ${row.parent_first_name} ${row.parent_last_name}`
-                    )
+                  .filter((row: any) => {
+                    const guardianNames = (row.guardians || [])
+                      .map((g: any) => `${g.first_name} ${g.surname}`)
+                      .join(" ");
+                    return `${row.student_first_name} ${row.student_last_name} ${guardianNames}`
                       .toLowerCase()
-                      .includes(searchRemove.toLowerCase())
-                  )
+                      .includes(searchRemove.toLowerCase());
+                  })
                   .map((row: any) => (
                     <tr key={row.student_id}>
                       <td>
@@ -1599,10 +2134,12 @@ const OwnerDashboard: React.FC = () => {
                       </td>
 
                       <td>
-                        {row.parent_first_name} {row.parent_last_name}
+                        {(row.guardians || []).map((g: any) => `${g.first_name} ${g.surname}`).join(", ") || "—"}
                       </td>
 
-                      <td>{row.parent_contact_number || "—"}</td>
+                      <td>
+                        {(row.guardians || []).map((g: any) => g.contact_number).filter(Boolean).join(", ") || "—"}
+                      </td>
 
                       <td style={{ textAlign: "center" }}>
                         <button
@@ -1972,6 +2509,491 @@ const OwnerDashboard: React.FC = () => {
                   );
                 })}
               </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ---------------------- PASSWORD MANAGEMENT SECTION ---------------------- */}
+      {selectedSection === "passwordManagement" && features.password_management && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
+          <div style={styles.card}>
+            <h3 style={{ marginBottom: 16 }}>Teachers</h3>
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ ...styles.table, width: "100%" }}>
+                <thead>
+                  <tr>
+                    <th style={{ textAlign: "left" }}>Teacher</th>
+                    <th style={{ textAlign: "left" }}>Email</th>
+                    <th style={{ textAlign: "center", width: 140 }}>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {teachers.map((t: any) => (
+                    <tr key={t.id}>
+                      <td>{t.username}</td>
+                      <td>{t.email || "—"}</td>
+                      <td style={{ textAlign: "center" }}>
+                        <button
+                          onClick={() => handleResetPassword(t.id, t.username)}
+                          style={styles.secondaryBtn}
+                        >
+                          Reset Password
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div style={styles.card}>
+            <h3 style={{ marginBottom: 16 }}>Parents</h3>
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ ...styles.table, width: "100%" }}>
+                <thead>
+                  <tr>
+                    <th style={{ textAlign: "left" }}>Parent</th>
+                    <th style={{ textAlign: "left" }}>Email</th>
+                    <th style={{ textAlign: "center", width: 140 }}>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {parents
+                    .filter((p: any) => p.parent_user_id)
+                    .map((p: any) => (
+                      <tr key={p.parent_id}>
+                        <td>
+                          {p.parent_first_name} {p.parent_last_name}
+                        </td>
+                        <td>{p.parent_email || "—"}</td>
+                        <td style={{ textAlign: "center" }}>
+                          <button
+                            onClick={() =>
+                              handleResetPassword(
+                                p.parent_user_id,
+                                `${p.parent_first_name} ${p.parent_last_name}`
+                              )
+                            }
+                            style={styles.secondaryBtn}
+                          >
+                            Reset Password
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ---------------------- TIMETABLE SECTION ---------------------- */}
+      {selectedSection === "timetable" && features.timetable && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
+          <div style={styles.card}>
+            <h3 style={{ marginBottom: 16 }}>Terms</h3>
+            <p style={{ ...styles.text, fontSize: 13, color: "#64748b" }}>
+              Every schedule lives inside a term. Create the terms that make up the school year, then expand one to see what's scheduled when.
+            </p>
+
+            {scheduleTerms.length === 0 ? (
+              <p style={styles.text}>No terms yet — add one below.</p>
+            ) : (
+              <div style={{ overflowX: "auto", marginBottom: 16 }}>
+                <table style={{ ...styles.table, width: "100%" }}>
+                  <thead>
+                    <tr>
+                      <th style={{ textAlign: "left" }}>Term</th>
+                      <th style={{ textAlign: "left" }}>Dates</th>
+                      <th style={{ textAlign: "center", width: 140 }}>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {scheduleTerms.map(t => {
+                      const today = todayStr();
+                      const isCurrent = t.start_date.slice(0, 10) <= today && today <= t.end_date.slice(0, 10);
+                      const isExpanded = expandedTermId === t.id;
+                      return (
+                        <React.Fragment key={t.id}>
+                          <tr style={isCurrent ? { background: "#eef2ff" } : undefined}>
+                            <td>
+                              <strong>{t.name}</strong>
+                              {isCurrent && <span style={{ marginLeft: 6, fontSize: 12, color: "#4338ca" }}>Current</span>}
+                            </td>
+                            <td>
+                              {formatDate(t.start_date)} – {formatDate(t.end_date)}
+                            </td>
+                            <td style={{ textAlign: "center" }}>
+                              <button style={styles.secondaryBtn} onClick={() => toggleTermExpand(t.id)}>
+                                {isExpanded ? "▼ Hide" : "▶ View Schedule"}
+                              </button>
+                            </td>
+                          </tr>
+                          {isExpanded && (
+                            <tr>
+                              <td colSpan={3} style={{ padding: 0 }}>
+                                <div style={{ padding: "12px 16px", background: "#f8fafc" }}>
+                                  {expandedTermSlotsLoading ? (
+                                    <p style={styles.text}>Loading schedule...</p>
+                                  ) : expandedTermSlots.length === 0 ? (
+                                    <p style={styles.text}>No classes scheduled in this term yet.</p>
+                                  ) : (
+                                    <div style={{ overflowX: "auto" }}>
+                                      <table style={{ ...styles.table, width: "100%" }}>
+                                        <thead>
+                                          <tr>
+                                            <th style={{ textAlign: "left" }}>Date</th>
+                                            <th style={{ textAlign: "left" }}>Time</th>
+                                            <th style={{ textAlign: "left" }}>Class</th>
+                                            <th style={{ textAlign: "left" }}>Subject</th>
+                                            <th style={{ textAlign: "left" }}>Teacher</th>
+                                          </tr>
+                                        </thead>
+                                        <tbody>
+                                          {[...expandedTermSlots]
+                                            .sort((a, b) => a.slot_date.localeCompare(b.slot_date) || a.start_time.localeCompare(b.start_time))
+                                            .map(s => (
+                                              <tr key={s.id}>
+                                                <td>{formatDate(s.slot_date)}</td>
+                                                <td>
+                                                  {s.start_time.slice(0, 5)}–{s.end_time.slice(0, 5)}
+                                                </td>
+                                                <td>{s.class_name}</td>
+                                                <td>{s.subject_name || "—"}</td>
+                                                <td>
+                                                  {s.teacher_first_name || s.teacher_surname
+                                                    ? `${s.teacher_first_name} ${s.teacher_surname}`
+                                                    : "—"}
+                                                </td>
+                                              </tr>
+                                            ))}
+                                        </tbody>
+                                      </table>
+                                    </div>
+                                  )}
+                                </div>
+                              </td>
+                            </tr>
+                          )}
+                        </React.Fragment>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            <form onSubmit={createScheduleTerm} style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "flex-end" }}>
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                <label style={{ fontWeight: 600 }}>Name</label>
+                <input
+                  value={newScheduleTerm.name}
+                  onChange={e => setNewScheduleTerm(prev => ({ ...prev, name: e.target.value }))}
+                  style={styles.input}
+                  placeholder="e.g. Term 1 2025-26"
+                  required
+                />
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                <label style={{ fontWeight: 600 }}>Start Date</label>
+                <input
+                  type="date"
+                  value={newScheduleTerm.start_date}
+                  onChange={e => setNewScheduleTerm(prev => ({ ...prev, start_date: e.target.value }))}
+                  style={styles.input}
+                  required
+                />
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                <label style={{ fontWeight: 600 }}>End Date</label>
+                <input
+                  type="date"
+                  value={newScheduleTerm.end_date}
+                  onChange={e => setNewScheduleTerm(prev => ({ ...prev, end_date: e.target.value }))}
+                  style={styles.input}
+                  required
+                />
+              </div>
+              <button style={{ ...styles.actionBtn, marginTop: 0 }}>Add Term</button>
+            </form>
+          </div>
+
+          <div style={styles.card}>
+            <h3 style={{ marginBottom: 16 }}>Events</h3>
+
+            {events.length === 0 ? (
+              <p style={styles.text}>No events yet.</p>
+            ) : (
+              <ul style={{ ...styles.list, marginBottom: 16 }}>
+                {events.map(ev => (
+                  <li key={ev.id} style={{ ...styles.listItem, display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
+                    <div>
+                      <strong>{ev.title}</strong> — {formatDate(ev.event_date)}
+                      {ev.start_time && ` · ${ev.start_time.slice(0, 5)}${ev.end_time ? `–${ev.end_time.slice(0, 5)}` : ""}`}
+                      {ev.description && <div style={{ fontSize: 13, color: "#64748b", marginTop: 4 }}>{ev.description}</div>}
+                    </div>
+                    <button
+                      style={{ ...styles.secondaryBtn, background: "#dc2626", color: "#fff", flexShrink: 0 }}
+                      onClick={() => deleteEvent(ev.id)}
+                    >
+                      Delete
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+
+            <form onSubmit={createEvent} style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "flex-end" }}>
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                <label style={{ fontWeight: 600 }}>Title</label>
+                <input
+                  value={newEvent.title}
+                  onChange={e => setNewEvent(prev => ({ ...prev, title: e.target.value }))}
+                  style={styles.input}
+                  placeholder="e.g. Parents' Evening"
+                  required
+                />
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                <label style={{ fontWeight: 600 }}>Date</label>
+                <input
+                  type="date"
+                  value={newEvent.event_date}
+                  onChange={e => setNewEvent(prev => ({ ...prev, event_date: e.target.value }))}
+                  style={styles.input}
+                  required
+                />
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                <label style={{ fontWeight: 600 }}>Start (optional)</label>
+                <input
+                  type="time"
+                  value={newEvent.start_time}
+                  onChange={e => setNewEvent(prev => ({ ...prev, start_time: e.target.value }))}
+                  style={styles.input}
+                />
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                <label style={{ fontWeight: 600 }}>End (optional)</label>
+                <input
+                  type="time"
+                  value={newEvent.end_time}
+                  onChange={e => setNewEvent(prev => ({ ...prev, end_time: e.target.value }))}
+                  style={styles.input}
+                />
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 6, minWidth: 200 }}>
+                <label style={{ fontWeight: 600 }}>Description (optional)</label>
+                <input
+                  value={newEvent.description}
+                  onChange={e => setNewEvent(prev => ({ ...prev, description: e.target.value }))}
+                  style={styles.input}
+                />
+              </div>
+              <button style={{ ...styles.actionBtn, marginTop: 0 }}>Add Event</button>
+            </form>
+          </div>
+
+          <div style={styles.card}>
+            <h3 style={{ marginBottom: 16 }}>Class Schedule</h3>
+            <p style={{ ...styles.text, fontSize: 13, color: "#64748b" }}>
+              Pick a class, then add its sessions by date — the term is worked out automatically from the date you pick.
+            </p>
+
+            <div style={{ display: "flex", flexDirection: "column", gap: 6, maxWidth: 320, marginBottom: 20 }}>
+              <label style={{ fontWeight: 600 }}>Class</label>
+              <select value={timetableClassId} onChange={e => loadTimetableSlots(e.target.value)} style={styles.input}>
+                <option value="">Select a class...</option>
+                {classes.map((cls: any) => (
+                  <option key={cls.id} value={cls.id}>
+                    {cls.class_name}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            {!timetableClassId ? (
+              <p style={styles.text}>Select a class above to manage its schedule.</p>
+            ) : (
+              <>
+                {timetableSlotsLoading ? (
+                  <p style={styles.text}>Loading schedule...</p>
+                ) : timetableSlots.length === 0 ? (
+                  <p style={styles.text}>No slots yet for this class.</p>
+                ) : (
+                  <div style={{ overflowX: "auto", marginBottom: 20 }}>
+                    <table style={{ ...styles.table, width: "100%" }}>
+                      <thead>
+                        <tr>
+                          <th style={{ textAlign: "left" }}>Date</th>
+                          <th style={{ textAlign: "left" }}>Time</th>
+                          <th style={{ textAlign: "left" }}>Subject</th>
+                          <th style={{ textAlign: "left" }}>Teacher</th>
+                          <th style={{ textAlign: "left" }}>Term</th>
+                          <th style={{ textAlign: "center", width: 160 }}>Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {[...timetableSlots]
+                          .sort((a, b) => a.slot_date.localeCompare(b.slot_date) || a.start_time.localeCompare(b.start_time))
+                          .map(slot => (
+                            <tr key={slot.id}>
+                              <td>{formatDate(slot.slot_date)}</td>
+                              <td>
+                                {slot.start_time.slice(0, 5)}–{slot.end_time.slice(0, 5)}
+                              </td>
+                              <td>{slot.subject_name || "—"}</td>
+                              <td>
+                                {slot.teacher_first_name || slot.teacher_surname
+                                  ? `${slot.teacher_first_name} ${slot.teacher_surname}`
+                                  : "—"}
+                              </td>
+                              <td>{slot.term_name || "—"}</td>
+                              <td style={{ textAlign: "center" }}>
+                                <button style={{ ...styles.secondaryBtn, marginRight: 6 }} onClick={() => startEditSlot(slot)}>
+                                  Edit
+                                </button>
+                                <button
+                                  style={{ ...styles.secondaryBtn, background: "#dc2626", color: "#fff" }}
+                                  onClick={() => deleteSlot(slot.id)}
+                                >
+                                  Delete
+                                </button>
+                              </td>
+                            </tr>
+                          ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+
+                <h4 style={{ marginBottom: 8 }}>{editingSlotId ? "Edit Slot" : "Add Slot"}</h4>
+                <form onSubmit={submitSlot} style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "flex-end" }}>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    <label style={{ fontWeight: 600 }}>Date</label>
+                    <input
+                      type="date"
+                      value={slotForm.slot_date}
+                      onChange={e => setSlotForm(prev => ({ ...prev, slot_date: e.target.value }))}
+                      style={styles.input}
+                      required
+                    />
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    <label style={{ fontWeight: 600 }}>Start</label>
+                    <input
+                      type="time"
+                      value={slotForm.start_time}
+                      onChange={e => setSlotForm(prev => ({ ...prev, start_time: e.target.value }))}
+                      style={styles.input}
+                      required
+                    />
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    <label style={{ fontWeight: 600 }}>End</label>
+                    <input
+                      type="time"
+                      value={slotForm.end_time}
+                      onChange={e => setSlotForm(prev => ({ ...prev, end_time: e.target.value }))}
+                      style={styles.input}
+                      required
+                    />
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    <label style={{ fontWeight: 600 }}>Subject (optional)</label>
+                    <input
+                      value={slotForm.subject_name}
+                      onChange={e => setSlotForm(prev => ({ ...prev, subject_name: e.target.value }))}
+                      style={styles.input}
+                    />
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    <label style={{ fontWeight: 600 }}>Teacher (optional)</label>
+                    <select
+                      value={slotForm.teacher_id}
+                      onChange={e => setSlotForm(prev => ({ ...prev, teacher_id: e.target.value }))}
+                      style={styles.input}
+                    >
+                      <option value="">None</option>
+                      {teachers.map((t: any) => (
+                        <option key={t.id} value={t.id}>
+                          {t.first_name || t.surname ? `${t.first_name || ""} ${t.surname || ""}`.trim() : t.username}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <button style={{ ...styles.actionBtn, marginTop: 0 }}>{editingSlotId ? "Save Changes" : "Add Slot"}</button>
+                    {editingSlotId && (
+                      <button type="button" onClick={cancelEditSlot} style={{ ...styles.secondaryBtn, marginTop: 0 }}>
+                        Cancel
+                      </button>
+                    )}
+                  </div>
+                </form>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ---------------------- ANALYTICS ---------------------- */}
+      {selectedSection === "analytics" && features.analytics_dashboard && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
+          <div style={styles.card}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 12, marginBottom: 16 }}>
+              <h3 style={{ margin: 0 }}>Attendance Trend</h3>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button
+                  style={{
+                    ...styles.secondaryBtn,
+                    ...(attendanceRange === "term" ? { background: "#2a78d6", color: "#fff" } : {})
+                  }}
+                  onClick={() => setAttendanceRange("term")}
+                >
+                  Term
+                </button>
+                <button
+                  style={{
+                    ...styles.secondaryBtn,
+                    ...(attendanceRange === "year" ? { background: "#2a78d6", color: "#fff" } : {})
+                  }}
+                  onClick={() => setAttendanceRange("year")}
+                >
+                  Year
+                </button>
+              </div>
+            </div>
+
+            {analyticsLoading || !analyticsData ? (
+              <p style={styles.text}>Loading analytics...</p>
+            ) : (
+              <LineChart
+                title={
+                  attendanceRange === "year"
+                    ? "Attendance rate — last 12 months"
+                    : analyticsData.attendanceTrend.termName
+                    ? `Attendance rate — ${analyticsData.attendanceTrend.termName}`
+                    : "Attendance rate — last 30 days"
+                }
+                emptyMessage="No attendance recorded yet in this range."
+                points={analyticsData.attendanceTrend.points.map(p => ({ x: p.date, y: p.rate }))}
+              />
+            )}
+          </div>
+
+          <div style={styles.card}>
+            {analyticsLoading || !analyticsData ? (
+              <p style={styles.text}>Loading analytics...</p>
+            ) : (
+              <BarChart
+                title="Students per class"
+                emptyMessage="No classes yet."
+                data={analyticsData.studentsPerClass.map(c => ({ label: c.className, value: c.studentCount }))}
+              />
             )}
           </div>
         </div>

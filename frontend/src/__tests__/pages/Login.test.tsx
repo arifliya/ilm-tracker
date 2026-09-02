@@ -7,7 +7,7 @@ import Login from "../../pages/Login";
 import { AuthContext } from "../../AuthContext";
 
 const renderLogin = (login = vi.fn().mockResolvedValue(undefined), initialEntries: any[] = ["/login"]) => {
-  const value = { user: null, loading: false, login, logout: vi.fn() };
+  const value = { user: null, loading: false, login, logout: vi.fn(), refreshUser: vi.fn() };
   return render(
     <MemoryRouter initialEntries={initialEntries}>
       <AuthContext.Provider value={value}>

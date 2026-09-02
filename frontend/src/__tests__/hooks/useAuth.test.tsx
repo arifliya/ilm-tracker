@@ -16,7 +16,8 @@ describe("useAuth", () => {
       user: { userId: 1, username: "jdoe", role: "admin" as const },
       loading: false,
       login: async () => {},
-      logout: async () => {}
+      logout: async () => {},
+      refreshUser: async () => {}
     };
 
     const { result } = renderHook(() => useAuth(), {

@@ -8,7 +8,7 @@ import { AuthContext } from "../../AuthContext";
 
 describe("PendingApproval", () => {
   it("shows the pending-approval message", () => {
-    const value = { user: null, loading: false, login: vi.fn(), logout: vi.fn() };
+    const value = { user: null, loading: false, login: vi.fn(), logout: vi.fn(), refreshUser: vi.fn() };
     render(
       <MemoryRouter>
         <AuthContext.Provider value={value}>
@@ -22,7 +22,7 @@ describe("PendingApproval", () => {
   it("logs out and navigates to /login when Logout is clicked", async () => {
     const user = userEvent.setup();
     const logout = vi.fn().mockResolvedValue(undefined);
-    const value = { user: null, loading: false, login: vi.fn(), logout };
+    const value = { user: null, loading: false, login: vi.fn(), logout, refreshUser: vi.fn() };
 
     render(
       <MemoryRouter initialEntries={["/pending"]}>

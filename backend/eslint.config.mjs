@@ -2,7 +2,10 @@ import js from "@eslint/js";
 import tseslint from "typescript-eslint";
 
 export default tseslint.config(
-  { ignores: ["dist/**", "node_modules/**"] },
+  // jest.config.js is a CommonJS tooling file (module.exports), not
+  // application source — same tier as dist/node_modules, not worth adding
+  // a Node-globals config block just to lint one config file.
+  { ignores: ["dist/**", "node_modules/**", "jest.config.js"] },
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {

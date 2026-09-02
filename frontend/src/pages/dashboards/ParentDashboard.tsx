@@ -4,6 +4,7 @@ import { dashboardStyles as styles } from "../../styles/dashboardStyles";
 import { publicStyles } from "../../styles/publicStyles";
 import BaseDashboard, { DashboardNavItem } from "../../components/BaseDashboard";
 import ChildFormFields from "../../components/ChildFormFields";
+import DirectDebitSection from "../../components/DirectDebitSection";
 import { emptyChildForm, validateChildForm } from "../../utils/childForm";
 import { formatDate } from "../../utils/formatDate";
 import { getErrorMessage } from "../../utils/getErrorMessage";
@@ -18,6 +19,7 @@ interface Child {
   surname: string;
   gender: string;
   date_of_birth: string;
+  guardian_code?: string;
   // if your /parent/children endpoint later returns class_name, you can add:
   // class_name?: string;
 }
@@ -39,7 +41,36 @@ interface StudentNote {
   author_last_name: string;
 }
 
-type SectionKey = "dashboard" | "children" | "tasks" | "addChild" | "notifications";
+interface ReportCardSubject {
+  id: number;
+  subject_name: string;
+  grade: string;
+  comment: string | null;
+}
+
+interface ReportCard {
+  id: number;
+  term_name: string;
+  subjects: ReportCardSubject[];
+}
+
+interface ScheduleSlot {
+  slot_date: string;
+  start_time: string;
+  end_time: string;
+  class_name: string;
+  subject_name: string | null;
+  teacher_first_name: string;
+  teacher_surname: string;
+}
+
+interface ChildSchedule {
+  student_id: number;
+  child_name: string;
+  slots: ScheduleSlot[];
+}
+
+type SectionKey = "dashboard" | "children" | "tasks" | "addChild" | "notifications" | "reportCards" | "directDebit";
 
 const BASE_NAV_ITEMS: DashboardNavItem[] = [
   { key: "dashboard", icon: "🏠", label: "Dashboard" },
@@ -53,7 +84,9 @@ const SECTION_TITLES: Record<SectionKey, string> = {
   children: "Your Children",
   tasks: "Tasks & Homework",
   addChild: "Add a New Child",
-  notifications: "Notifications"
+  notifications: "Notifications",
+  reportCards: "Report Cards",
+  directDebit: "Direct Debit"
 };
 
 const ParentDashboard: React.FC = () => {
@@ -66,11 +99,21 @@ const ParentDashboard: React.FC = () => {
   const [studentNotes, setStudentNotes] = useState<StudentNote[]>([]);
   const [notesLoading, setNotesLoading] = useState(false);
 
+  const [reportCardChild, setReportCardChild] = useState<Child | null>(null);
+  const [childReportCards, setChildReportCards] = useState<ReportCard[]>([]);
+  const [reportCardsLoading, setReportCardsLoading] = useState(false);
+
+  const [schedule, setSchedule] = useState<ChildSchedule[]>([]);
+  const [scheduleLoading, setScheduleLoading] = useState(false);
+  const [scheduleExpanded, setScheduleExpanded] = useState(false);
+
   const [selectedSection, setSelectedSection] =
     useState<SectionKey>("dashboard");
 
   // Add Child form — shares its fields/validation with the public register page
   const [newChild, setNewChild] = useState({ ...emptyChildForm });
+  const [addChildMode, setAddChildMode] = useState<"new" | "link">("new");
+  const [linkGuardianCode, setLinkGuardianCode] = useState("");
 
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [formError, setFormError] = useState("");
@@ -123,6 +166,28 @@ const ParentDashboard: React.FC = () => {
 
   usePolling(loadDashboard, POLL_INTERVAL_MS);
 
+  const loadSchedule = async () => {
+    setScheduleLoading(true);
+    try {
+      const res = await api.get("/parent/schedule");
+      setSchedule(res.data.schedule || []);
+    } catch (err) {
+      console.error("Load class schedule error:", err);
+      setLoadError(getErrorMessage(err, "Failed to load class schedule"));
+    } finally {
+      setScheduleLoading(false);
+    }
+  };
+
+  const toggleSchedule = () => {
+    if (scheduleExpanded) {
+      setScheduleExpanded(false);
+      return;
+    }
+    setScheduleExpanded(true);
+    loadSchedule();
+  };
+
   const handleAddChild = async (e: React.FormEvent) => {
     e.preventDefault();
 
@@ -143,6 +208,26 @@ const ParentDashboard: React.FC = () => {
     } catch (err) {
       console.error("Add child error:", err);
       setFormError(getErrorMessage(err, "Failed to add child. Please try again."));
+    }
+  };
+
+  const handleLinkGuardian = async (e: React.FormEvent) => {
+    e.preventDefault();
+
+    if (!linkGuardianCode.trim()) {
+      setFormError("Guardian code is required.");
+      return;
+    }
+
+    try {
+      await api.post("/parent/link-guardian", { guardian_code: linkGuardianCode.trim() });
+
+      setLinkGuardianCode("");
+      setFormError("");
+      setSuccessMessage("Request submitted. Pending admin approval.");
+    } catch (err) {
+      console.error("Link guardian error:", err);
+      setFormError(getErrorMessage(err, "Failed to submit guardian link request."));
     }
   };
 
@@ -167,6 +252,27 @@ const ParentDashboard: React.FC = () => {
     setStudentNotes([]);
   };
 
+  const openReportCardModal = async (child: Child) => {
+    setReportCardChild(child);
+    setChildReportCards([]);
+    setReportCardsLoading(true);
+
+    try {
+      const res = await api.get(`/report-cards/students/${child.id}`);
+      setChildReportCards(res.data.reportCards || []);
+    } catch (err) {
+      console.error("Load report cards error:", err);
+      setLoadError(getErrorMessage(err, "Failed to load report cards"));
+    } finally {
+      setReportCardsLoading(false);
+    }
+  };
+
+  const closeReportCardModal = () => {
+    setReportCardChild(null);
+    setChildReportCards([]);
+  };
+
   const markNotificationRead = async (id: number) => {
     setNotifications(prev =>
       prev.map(n => (n.id === id && !n.read_at ? { ...n, read_at: new Date().toISOString() } : n))
@@ -178,9 +284,15 @@ const ParentDashboard: React.FC = () => {
     }
   };
 
-  const navItems = features.notifications
+  let navItems = features.notifications
     ? [...BASE_NAV_ITEMS, { key: "notifications", icon: "📣", label: "Notifications" }]
     : BASE_NAV_ITEMS;
+  if (features.report_cards) {
+    navItems = [...navItems, { key: "reportCards", icon: "🎓", label: "Report Cards" }];
+  }
+  if (features.direct_debit) {
+    navItems = [...navItems, { key: "directDebit", icon: "💳", label: "Direct Debit" }];
+  }
 
   return (
     <BaseDashboard
@@ -250,6 +362,80 @@ const ParentDashboard: React.FC = () => {
               </p>
             </div>
           </div>
+
+          {/* Class Schedule Dropdown */}
+          {features.timetable && (
+            <div style={styles.card}>
+              <div
+                onClick={toggleSchedule}
+                style={{ display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer" }}
+              >
+                <h4 style={{ margin: 0 }}>Class Schedule</h4>
+                <button style={styles.secondaryBtn} onClick={toggleSchedule}>
+                  {scheduleExpanded ? "▼ Hide" : "▶ View Schedule"}
+                </button>
+              </div>
+
+              {scheduleExpanded && (
+                <div style={{ marginTop: 16 }}>
+                  {scheduleLoading ? (
+                    <p style={styles.text}>Loading class schedule...</p>
+                  ) : children.length === 0 ? (
+                    <p style={styles.text}>No children linked to your account.</p>
+                  ) : (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+                      {children.map(child => {
+                        const childSlots = schedule.find(s => s.student_id === child.id)?.slots || [];
+                        return (
+                          <div key={child.id}>
+                            <p style={{ fontWeight: 600, marginBottom: 8 }}>
+                              {child.first_name} {child.surname}
+                            </p>
+                            {childSlots.length === 0 ? (
+                              <p style={styles.text}>No scheduled classes yet.</p>
+                            ) : (
+                              <div style={{ overflowX: "auto" }}>
+                                <table style={{ ...styles.table, width: "100%" }}>
+                                  <thead>
+                                    <tr>
+                                      <th style={{ textAlign: "left" }}>Date</th>
+                                      <th style={{ textAlign: "left" }}>Time</th>
+                                      <th style={{ textAlign: "left" }}>Class</th>
+                                      <th style={{ textAlign: "left" }}>Subject</th>
+                                      <th style={{ textAlign: "left" }}>Teacher</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {[...childSlots]
+                                      .sort((a, b) => a.slot_date.localeCompare(b.slot_date) || a.start_time.localeCompare(b.start_time))
+                                      .map((s, i) => (
+                                        <tr key={i}>
+                                          <td>{formatDate(s.slot_date)}</td>
+                                          <td>
+                                            {s.start_time.slice(0, 5)}–{s.end_time.slice(0, 5)}
+                                          </td>
+                                          <td>{s.class_name}</td>
+                                          <td>{s.subject_name || "—"}</td>
+                                          <td>
+                                            {s.teacher_first_name || s.teacher_surname
+                                              ? `${s.teacher_first_name} ${s.teacher_surname}`
+                                              : "—"}
+                                          </td>
+                                        </tr>
+                                      ))}
+                                  </tbody>
+                                </table>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
 
@@ -268,6 +454,7 @@ const ParentDashboard: React.FC = () => {
                   <th style={{ textAlign: "left" }}>Name</th>
                   <th style={{ textAlign: "left" }}>Gender</th>
                   <th style={{ textAlign: "left" }}>Date of Birth</th>
+                  <th style={{ textAlign: "left" }}>Guardian Code</th>
                   {features.student_notes && <th style={{ textAlign: "center", width: 120 }}>Actions</th>}
                 </tr>
               </thead>
@@ -282,6 +469,10 @@ const ParentDashboard: React.FC = () => {
                     </td>
                     <td>{child.gender || "—"}</td>
                     <td>{formatDate(child.date_of_birth)}</td>
+                    <td>
+                      {child.guardian_code || "—"}
+                      <div style={{ fontSize: 11, color: "#94a3b8" }}>Share with a second guardian</div>
+                    </td>
                     {features.student_notes && (
                       <td style={{ textAlign: "center" }}>
                         <button style={styles.actionBtn} onClick={() => openNotesModal(child)}>
@@ -349,39 +540,92 @@ const ParentDashboard: React.FC = () => {
           <div style={{ ...publicStyles.card, maxWidth: 500, width: "100%" }}>
             <h3 style={publicStyles.sectionTitle}>Add a Child</h3>
 
+            <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+              <button
+                type="button"
+                style={{
+                  ...publicStyles.secondaryBtn,
+                  ...(addChildMode === "new" ? { background: "#2563eb", color: "#fff" } : {})
+                }}
+                onClick={() => {
+                  setAddChildMode("new");
+                  setFormError("");
+                }}
+              >
+                Register a new child
+              </button>
+              <button
+                type="button"
+                style={{
+                  ...publicStyles.secondaryBtn,
+                  ...(addChildMode === "link" ? { background: "#2563eb", color: "#fff" } : {})
+                }}
+                onClick={() => {
+                  setAddChildMode("link");
+                  setFormError("");
+                }}
+              >
+                Link to an existing child
+              </button>
+            </div>
+
             {formError && (
               <p style={{ ...publicStyles.text, color: "red", marginBottom: 12 }}>
                 {formError}
               </p>
             )}
 
-            <form onSubmit={handleAddChild} style={publicStyles.form}>
-              <div
-                style={{
-                  padding: 12,
-                  marginBottom: 12
-                }}
-              >
-                <ChildFormFields value={newChild} onChange={updateNewChild} errors={errors} />
-              </div>
+            {addChildMode === "new" ? (
+              <form onSubmit={handleAddChild} style={publicStyles.form}>
+                <div
+                  style={{
+                    padding: 12,
+                    marginBottom: 12
+                  }}
+                >
+                  <ChildFormFields value={newChild} onChange={updateNewChild} errors={errors} />
+                </div>
 
-              <button type="submit" style={publicStyles.actionBtn}>
-                Add Child
-              </button>
+                <button type="submit" style={publicStyles.actionBtn}>
+                  Add Child
+                </button>
 
-              {/* Reset form) */}
-              <button
-                type="button"
-                style={publicStyles.secondaryBtn}
-                onClick={() => {
-                  setNewChild({ ...emptyChildForm });
-                  setErrors({});
-                  setFormError("");
-                }}
-              >
-                Reset Form
-              </button>
-            </form>
+                {/* Reset form) */}
+                <button
+                  type="button"
+                  style={publicStyles.secondaryBtn}
+                  onClick={() => {
+                    setNewChild({ ...emptyChildForm });
+                    setErrors({});
+                    setFormError("");
+                  }}
+                >
+                  Reset Form
+                </button>
+              </form>
+            ) : (
+              <form onSubmit={handleLinkGuardian} style={publicStyles.form}>
+                <p style={{ ...publicStyles.text, marginBottom: 12 }}>
+                  If this child is already registered under another guardian (e.g. a separated
+                  parent), enter their guardian code here to request linking as an additional
+                  guardian. This requires admin approval.
+                </p>
+
+                <div style={{ padding: 12, marginBottom: 12 }}>
+                  <label style={publicStyles.label}>Guardian code</label>
+                  <input
+                    style={publicStyles.input}
+                    value={linkGuardianCode}
+                    onChange={e => setLinkGuardianCode(e.target.value)}
+                    placeholder="Provided by the child's other guardian"
+                  />
+                </div>
+
+                <button type="submit" style={publicStyles.actionBtn}>
+                  Submit Request
+                </button>
+              </form>
+            )}
           </div>
         </div>
       )}
@@ -478,6 +722,119 @@ const ParentDashboard: React.FC = () => {
 
             <button
               onClick={closeNotesModal}
+              style={{
+                marginTop: 20,
+                background: "#334155",
+                color: "white",
+                border: "none",
+                padding: "8px 16px",
+                borderRadius: 6,
+                cursor: "pointer",
+                width: "100%"
+              }}
+            >
+              Close
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ---------------------- DIRECT DEBIT SECTION ---------------------- */}
+      {selectedSection === "directDebit" && features.direct_debit && <DirectDebitSection />}
+
+      {/* ---------------------- REPORT CARDS SECTION ---------------------- */}
+      {selectedSection === "reportCards" && features.report_cards && (
+        <div style={styles.card}>
+          <h3 style={{ marginBottom: 16 }}>Report Cards</h3>
+
+          {children.length === 0 ? (
+            <p style={styles.text}>No children linked to your account.</p>
+          ) : (
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ ...styles.table, width: "100%" }}>
+                <thead>
+                  <tr>
+                    <th style={{ textAlign: "left" }}>Name</th>
+                    <th style={{ textAlign: "center", width: 140 }}>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {children.map(child => (
+                    <tr key={child.id}>
+                      <td>
+                        <strong>
+                          {child.first_name} {child.surname}
+                        </strong>
+                      </td>
+                      <td style={{ textAlign: "center" }}>
+                        <button style={styles.actionBtn} onClick={() => openReportCardModal(child)}>
+                          View
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
+      {reportCardChild && (
+        <div
+          className="modal-overlay"
+          style={{
+            position: "fixed",
+            top: 0,
+            left: 0,
+            width: "100vw",
+            height: "100vh",
+            background: "rgba(0,0,0,0.5)",
+            display: "flex",
+            justifyContent: "center",
+            alignItems: "center",
+            zIndex: 9999,
+            padding: 16
+          }}
+        >
+          <div
+            style={{
+              background: "white",
+              padding: 24,
+              borderRadius: 12,
+              width: "100%",
+              maxWidth: 450,
+              maxHeight: "85vh",
+              overflowY: "auto",
+              boxShadow: "0 4px 20px rgba(0,0,0,0.2)"
+            }}
+          >
+            <h3 style={{ marginBottom: 16 }}>
+              Report Cards — {reportCardChild.first_name} {reportCardChild.surname}
+            </h3>
+
+            {reportCardsLoading ? (
+              <p style={styles.text}>Loading report cards...</p>
+            ) : childReportCards.length === 0 ? (
+              <p style={styles.text}>No report cards yet.</p>
+            ) : (
+              <ul style={styles.list}>
+                {childReportCards.map(card => (
+                  <li key={card.id} style={styles.listItem}>
+                    <strong>{card.term_name}</strong>
+                    {card.subjects.map(s => (
+                      <div key={s.id} style={{ fontSize: 14, marginTop: 4 }}>
+                        <strong>{s.subject_name}:</strong> {s.grade}
+                        {s.comment && <div style={{ fontSize: 13, color: "#94a3b8" }}>{s.comment}</div>}
+                      </div>
+                    ))}
+                  </li>
+                ))}
+              </ul>
+            )}
+
+            <button
+              onClick={closeReportCardModal}
               style={{
                 marginTop: 20,
                 background: "#334155",

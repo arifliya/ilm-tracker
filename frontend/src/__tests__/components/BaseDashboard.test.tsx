@@ -6,7 +6,7 @@ import { MemoryRouter } from "react-router-dom";
 import BaseDashboard from "../../components/BaseDashboard";
 import { AuthContext } from "../../AuthContext";
 
-const authValue = { user: null, loading: false, login: vi.fn(), logout: vi.fn() };
+const authValue = { user: null, loading: false, login: vi.fn(), logout: vi.fn(), refreshUser: vi.fn() };
 
 const renderDashboard = (props: Partial<React.ComponentProps<typeof BaseDashboard>> = {}) =>
   render(

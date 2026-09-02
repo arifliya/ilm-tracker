@@ -3,6 +3,7 @@ import { api } from "../../api";
 import { dashboardStyles as styles } from "../../styles/dashboardStyles";
 import BaseDashboard, { DashboardNavItem } from "../../components/BaseDashboard";
 import { getErrorMessage } from "../../utils/getErrorMessage";
+import { formatDate } from "../../utils/formatDate";
 import { usePolling } from "../../hooks/usePolling";
 
 const POLL_INTERVAL_MS = 30000;
@@ -114,7 +115,7 @@ const StudentDashboard: React.FC = () => {
                       <strong>{task.title}</strong>
                     </td>
                     <td>{task.class_name}</td>
-                    <td>{task.due_date}</td>
+                    <td>{formatDate(task.due_date)}</td>
                     <td>{task.description}</td>
                   </tr>
                 ))}

@@ -6,6 +6,7 @@ type Role =
   | "owner"
   | "maintainer"
   | "admin"
+  | "treasurer"
   | "teacher"
   | "parent"
   | "student"
@@ -16,6 +17,7 @@ interface User {
   username: string;
   role: Role;
   fullName?: string | null;
+  mustResetPassword?: boolean;
 }
 
 interface AuthContextValue {
@@ -23,13 +25,15 @@ interface AuthContextValue {
   loading: boolean;
   login: (username: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
+  refreshUser: () => Promise<void>;
 }
 
 export const AuthContext = createContext<AuthContextValue>({
   user: null,
   loading: true,
   login: async () => {},
-  logout: async () => {}
+  logout: async () => {},
+  refreshUser: async () => {}
 });
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
@@ -70,7 +74,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
   };
 
   return (
-    <AuthContext.Provider value={{ user, loading, login, logout }}>
+    <AuthContext.Provider value={{ user, loading, login, logout, refreshUser: fetchMe }}>
       {children}
     </AuthContext.Provider>
   );

@@ -5,6 +5,7 @@ import { publicStyles as styles } from "../styles/publicStyles";
 import { getErrorMessage } from "../utils/getErrorMessage";
 import ChildFormFields from "../components/ChildFormFields";
 import { ChildFormData, emptyChildForm, validateChildForm } from "../utils/childForm";
+import { validatePassword } from "../utils/password";
 
 type Tab = "parent" | "staff";
 
@@ -80,9 +81,29 @@ const inputRight = {
     setStudentErrors(prev => [...prev, {}]);
   };
   const removeStudent = (index: number) => {
-    if (students.length === 1) return;
+    // Allowed to go to zero — a parent registering purely to link as an
+    // additional guardian on an existing child (via guardianLinks below)
+    // doesn't need to submit a new-child form at all.
     setStudents(prev => prev.filter((_, i) => i !== index));
     setStudentErrors(prev => prev.filter((_, i) => i !== index));
+  };
+
+  // ---------------------- GUARDIAN LINK STATE ----------------------
+  // Deliberately separate from `students` — a guardian link entry is a
+  // single existing-child code, not a full student record, so it doesn't
+  // reuse ChildFormData/ChildFormFields.
+  const [guardianLinks, setGuardianLinks] = useState<string[]>([]);
+
+  const updateGuardianLink = (index: number, value: string) => {
+    setGuardianLinks(prev => {
+      const copy = [...prev];
+      copy[index] = value;
+      return copy;
+    });
+  };
+  const addGuardianLink = () => setGuardianLinks(prev => [...prev, ""]);
+  const removeGuardianLink = (index: number) => {
+    setGuardianLinks(prev => prev.filter((_, i) => i !== index));
   };
 
   // ---------------------- STAFF FORM STATE ----------------------
@@ -129,8 +150,9 @@ const inputRight = {
       setFieldError("parentEmail", "Email is required");
       valid = false;
     }
-    if (!parentPassword.trim()) {
-      setFieldError("parentPassword", "Password is required");
+    const parentPasswordError = validatePassword(parentPassword);
+    if (parentPasswordError) {
+      setFieldError("parentPassword", parentPasswordError);
       valid = false;
     }
     if (!parentContact.trim()) {
@@ -141,6 +163,16 @@ const inputRight = {
     const nextStudentErrors = students.map(s => validateChildForm(s));
     setStudentErrors(nextStudentErrors);
     if (nextStudentErrors.some(errs => Object.keys(errs).length > 0)) {
+      valid = false;
+    }
+
+    const trimmedGuardianLinks = guardianLinks.map(c => c.trim());
+    if (students.length === 0 && trimmedGuardianLinks.filter(Boolean).length === 0) {
+      setError("Add at least one student, or a guardian code for an existing child.");
+      valid = false;
+    }
+    if (trimmedGuardianLinks.some(c => !c)) {
+      setError("Each guardian code entry must not be empty — remove any blank ones.");
       valid = false;
     }
 
@@ -177,8 +209,9 @@ const validateStaff = () => {
     valid = false;
   }
 
-  if (!staffPassword.trim()) {
-    setFieldError("staffPassword", "Password is required");
+  const staffPasswordError = validatePassword(staffPassword);
+  if (staffPasswordError) {
+    setFieldError("staffPassword", staffPasswordError);
     valid = false;
   }
 
@@ -257,7 +290,11 @@ const validateStaff = () => {
           postcode: s.postcode,
           medical_condition: s.medical_condition,
           class_code: s.class_code
-        }))
+        })),
+        guardian_links: guardianLinks
+          .map(c => c.trim())
+          .filter(Boolean)
+          .map(guardian_code => ({ guardian_code }))
       });
 
       setShowSuccessScreen(true);
@@ -506,16 +543,40 @@ const validateStaff = () => {
           errors={studentErrors[idx] || {}}
         />
 
-        {students.length > 1 && (
-          <button type="button" style={styles.secondaryBtn} onClick={() => removeStudent(idx)}>
-            Remove this student
-          </button>
-        )}
+        <button type="button" style={styles.secondaryBtn} onClick={() => removeStudent(idx)}>
+          Remove this student
+        </button>
       </div>
     ))}
 
     <button type="button" style={styles.secondaryBtn} onClick={addStudent}>
       Add another student
+    </button>
+
+    {/* ---------------------- GUARDIAN LINK SECTION ---------------------- */}
+    <h3 style={styles.sectionTitle}>Link to a child already registered</h3>
+    <p style={{ ...styles.text, marginBottom: 8 }}>
+      If a child is already registered under another guardian (e.g. a separated parent), enter their
+      guardian code here instead of registering them again. This requires admin approval.
+    </p>
+
+    {guardianLinks.map((code, idx) => (
+      <div key={idx} className="form-row" style={row}>
+        <label className="form-row-label" style={labelLeft}>Guardian code</label>
+        <input
+          style={inputRight}
+          value={code}
+          onChange={e => updateGuardianLink(idx, e.target.value)}
+          placeholder="Provided by the child's other guardian"
+        />
+        <button type="button" style={styles.secondaryBtn} onClick={() => removeGuardianLink(idx)}>
+          Remove
+        </button>
+      </div>
+    ))}
+
+    <button type="button" style={styles.secondaryBtn} onClick={addGuardianLink}>
+      Add a guardian code
     </button>
 
     <button type="submit" style={styles.actionBtn}>

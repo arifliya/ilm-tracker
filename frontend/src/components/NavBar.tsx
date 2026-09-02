@@ -1,7 +1,9 @@
-import React from "react";
+import React, { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../hooks/useAuth";
 import { dashboardStyles as styles } from "../styles/dashboardStyles";
+import { api } from "../api";
+import ChangePasswordModal from "./ChangePasswordModal";
 
 interface NavbarProps {
   onMenuClick?: () => void;
@@ -10,6 +12,18 @@ interface NavbarProps {
 const Navbar: React.FC<NavbarProps> = ({ onMenuClick }) => {
   const navigate = useNavigate();
   const { user, logout: authLogout } = useAuth();
+  const [passwordManagementEnabled, setPasswordManagementEnabled] = useState(false);
+  const [showChangePassword, setShowChangePassword] = useState(false);
+
+  // Fetched here rather than threaded down as a prop from each of the 7
+  // dashboard files — this is the one place "Change Password" needs to
+  // show up regardless of role.
+  useEffect(() => {
+    api
+      .get("/features")
+      .then(res => setPasswordManagementEnabled(!!res.data?.flags?.password_management))
+      .catch(() => setPasswordManagementEnabled(false));
+  }, []);
 
   const logout = async () => {
     try {
@@ -59,10 +73,17 @@ const Navbar: React.FC<NavbarProps> = ({ onMenuClick }) => {
       {/* RIGHT: USER + LOGOUT */}
       <div style={styles.navRight}>
         <span className="navbar-username" style={styles.navUser}>{displayName}</span>
+        {passwordManagementEnabled && (
+          <button style={styles.secondaryBtn} onClick={() => setShowChangePassword(true)}>
+            Change Password
+          </button>
+        )}
         <button style={styles.logoutBtn} onClick={logout}>
           Logout
         </button>
       </div>
+
+      {showChangePassword && <ChangePasswordModal onClose={() => setShowChangePassword(false)} />}
     </div>
   );
 };

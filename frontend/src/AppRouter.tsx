@@ -15,6 +15,7 @@ import Footer from "./components/Footer";
 import Home from "./pages/Home";
 import Login from "./pages/Login";
 import PendingApproval from "./pages/PendingApproval";
+import ForcePasswordReset from "./pages/ForcePasswordReset";
 import Register from "./pages/Register";
 import PrivacyPolicy from "./pages/PrivacyPolicy";
 import NoDashboard from "./pages/NoDashboard";
@@ -24,6 +25,7 @@ import SystemAdminDashboard from "./pages/dashboards/SystemAdminDashboard";
 import OwnerDashboard from "./pages/dashboards/OwnerDashboard";
 import MaintainerDashboard from "./pages/dashboards/MaintainerDashboard";
 import AdminDashboard from "./pages/dashboards/AdminDashboard";
+import TreasurerDashboard from "./pages/dashboards/TreasurerDashboard";
 import TeacherDashboard from "./pages/dashboards/TeacherDashboard";
 import ParentDashboard from "./pages/dashboards/ParentDashboard";
 import StudentDashboard from "./pages/dashboards/StudentDashboard";
@@ -39,6 +41,10 @@ const ProtectedRoute: React.FC<{
 
   if (user.role === "pending") {
     return <Navigate to="/pending" replace />;
+  }
+
+  if (user.mustResetPassword) {
+    return <Navigate to="/force-password-reset" replace />;
   }
 
   if (allowedRoles && !allowedRoles.includes(user.role)) {
@@ -61,6 +67,8 @@ const RoleRouter: React.FC = () => {
       return <MaintainerDashboard />;
     case "admin":
       return <AdminDashboard />;
+    case "treasurer":
+      return <TreasurerDashboard />;
     case "teacher":
       return <TeacherDashboard />;
     case "parent":
@@ -88,6 +96,7 @@ const AppLayout: React.FC = () => {
           <Route path="/" element={<Home />} />
           <Route path="/login" element={<Login />} />
           <Route path="/pending" element={<PendingApproval />} />
+          <Route path="/force-password-reset" element={<ForcePasswordReset />} />
           <Route path="/register" element={<Register />} />
           <Route path="/privacy-policy" element={<PrivacyPolicy />} />
 

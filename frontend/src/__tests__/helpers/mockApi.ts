@@ -26,14 +26,22 @@ export const installDashboardApiDefaults = (mockGet: ReturnType<typeof vi.fn>) =
     ["/teacher/classes", { classes: [] }],
     ["/teacher/tasks", { tasks: [] }],
     ["/system-admin/schools", []],
-    ["/system-admin/feature-flags", { flags: [], schools: [], overrides: [] }]
+    ["/system-admin/feature-flags", { flags: [], schools: [], overrides: [] }],
+    ["/report-cards/terms", { terms: [] }],
+    ["/timetable/events", { events: [] }],
+    ["/timetable/terms", { terms: [] }],
+    ["/timetable/slots", { slots: [] }]
   ];
 
   mockGet.mockImplementation((url: string) => {
     const match = routes.find(([prefix]) => url === prefix || url.startsWith(prefix));
     if (match) return Promise.resolve({ data: match[1] });
     if (url.startsWith("/notes/students/")) return Promise.resolve({ data: { notes: [] } });
+    if (url.startsWith("/report-cards/students/")) return Promise.resolve({ data: { reportCards: [] } });
+    if (url.startsWith("/timetable/classes/") && url.endsWith("/terms")) return Promise.resolve({ data: { terms: [] } });
+    if (url.startsWith("/timetable/classes/")) return Promise.resolve({ data: { slots: [] } });
     if (url.startsWith("/teacher/attendance/")) return Promise.resolve({ data: { students: [], history: [], date: "2026-01-01" } });
+    if (url.startsWith("/teacher/classes/") && url.includes("/parent-contacts")) return Promise.resolve({ data: { guardians: [] } });
     return Promise.resolve({ data: [] });
   });
 };

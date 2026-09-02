@@ -62,6 +62,7 @@ const Login: React.FC = () => {
               style={styles.input}
               value={username}
               onChange={e => setUsername(e.target.value)}
+              data-testid="username-input"
             />
           </div>
 
@@ -72,6 +73,7 @@ const Login: React.FC = () => {
               style={styles.input}
               value={password}
               onChange={e => setPassword(e.target.value)}
+              data-testid="password-input"
             />
           </div>
 

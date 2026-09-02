@@ -3,6 +3,7 @@ import { pool } from "../config/db";
 import { authMiddleware } from "../middleware/auth";
 import { AuthenticatedRequest } from "../types/auth";
 import { resetExpiredFeatureFlags } from "../utils/featureFlags";
+import { asyncHandler } from "../utils/asyncHandler";
 
 const router = Router();
 
@@ -12,8 +13,10 @@ const router = Router();
    that school's explicit override where system_admin has set one,
    otherwise each flag's default_enabled.
    ============================================================ */
-router.get("/", authMiddleware, async (req: AuthenticatedRequest, res) => {
-  try {
+router.get(
+  "/",
+  authMiddleware,
+  asyncHandler(async (req: AuthenticatedRequest, res) => {
     await resetExpiredFeatureFlags();
 
     const [rows] = await pool.query(
@@ -32,10 +35,7 @@ router.get("/", authMiddleware, async (req: AuthenticatedRequest, res) => {
     });
 
     res.json({ flags });
-  } catch (err) {
-    console.error("Feature status error:", err);
-    res.status(500).json({ message: "Failed to load feature status" });
-  }
-});
+  })
+);
 
 export default router;

@@ -1,0 +1,15 @@
+{
+  "name": "ilm-e2e",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "test": "playwright test",
+    "test:core": "playwright test --grep-invert @flagged",
+    "report": "playwright show-report"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.48.0",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.6.0"
+  }
+}

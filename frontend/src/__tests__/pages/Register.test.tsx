@@ -77,7 +77,9 @@ describe("Register", () => {
     renderRegister();
 
     expect(screen.getByText("Student 1")).toBeInTheDocument();
-    expect(screen.queryByText("Remove this student")).not.toBeInTheDocument();
+    // Removable even as the last one — a parent registering purely to link
+    // as a second guardian on an existing child doesn't need a new-child form.
+    expect(screen.getAllByText("Remove this student")).toHaveLength(1);
 
     await user.click(screen.getByText("Add another student"));
     expect(screen.getByText("Student 2")).toBeInTheDocument();
@@ -85,6 +87,17 @@ describe("Register", () => {
 
     await user.click(screen.getAllByText("Remove this student")[1]);
     expect(screen.queryByText("Student 2")).not.toBeInTheDocument();
+  });
+
+  it("allows removing the only student down to zero when linking an existing child instead", async () => {
+    const user = userEvent.setup();
+    renderRegister();
+
+    await user.click(screen.getByText("Remove this student"));
+    expect(screen.queryByText("Student 1")).not.toBeInTheDocument();
+
+    await user.click(screen.getByText("Add a guardian code"));
+    expect(screen.getByPlaceholderText("Provided by the child's other guardian")).toBeInTheDocument();
   });
 
   it("registers a parent successfully end to end and shows the success screen", async () => {

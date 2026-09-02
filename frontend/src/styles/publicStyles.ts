@@ -22,7 +22,7 @@ export const publicStyles: Record<string, CSSProperties> = {
 
   card: {
     width: "100%",
-    maxWidth: "420px",
+    maxWidth: "460px",
     background: "#fff",
     padding: "32px",
     borderRadius: "12px",

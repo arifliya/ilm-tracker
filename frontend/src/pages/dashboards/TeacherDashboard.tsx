@@ -10,7 +10,7 @@ import { usePolling } from "../../hooks/usePolling";
 
 const POLL_INTERVAL_MS = 30000;
 
-type SectionKey = "dashboard" | "classes" | "attendance" | "tasks" | "report" | "notifications";
+type SectionKey = "dashboard" | "classes" | "attendance" | "tasks" | "report" | "notifications" | "reportCards";
 
 interface ClassItem {
   id: number;
@@ -23,6 +23,15 @@ interface AttendanceStudent {
   first_name: string;
   surname: string;
   attendance_status?: string;
+}
+
+interface ParentContact {
+  first_name: string;
+  middle_name: string | null;
+  surname: string;
+  relationship_to_student: string | null;
+  contact_number: string | null;
+  email: string | null;
 }
 
 interface TaskItem {
@@ -42,6 +51,30 @@ interface StudentNote {
   author_first_name: string;
   author_last_name: string;
 }
+
+interface Term {
+  id: number;
+  name: string;
+  start_date: string;
+  end_date: string;
+}
+
+interface ReportCardSubject {
+  id: number;
+  subject_name: string;
+  grade: string;
+  comment: string | null;
+}
+
+interface ReportCard {
+  id: number;
+  term_id: number;
+  term_name: string;
+  subjects: ReportCardSubject[];
+}
+
+type SubjectFormRow = { subject_name: string; grade: string; comment: string };
+const emptySubjectRow = (): SubjectFormRow => ({ subject_name: "", grade: "", comment: "" });
 
 interface AttendanceHistoryRow {
   date: string;
@@ -65,7 +98,8 @@ const SECTION_TITLES: Record<SectionKey, string> = {
   attendance: "Attendance",
   tasks: "Tasks",
   report: "Attendance Report",
-  notifications: "Notifications"
+  notifications: "Notifications",
+  reportCards: "Report Cards"
 };
 
 const TeacherDashboard: React.FC = () => {
@@ -83,8 +117,23 @@ const TeacherDashboard: React.FC = () => {
   const [notesStudent, setNotesStudent] = useState<AttendanceStudent | null>(null);
   const [studentNotes, setStudentNotes] = useState<StudentNote[]>([]);
   const [notesLoading, setNotesLoading] = useState(false);
+
+  const [parentContactStudent, setParentContactStudent] = useState<AttendanceStudent | null>(null);
+  const [parentContacts, setParentContacts] = useState<ParentContact[]>([]);
+  const [parentContactLoading, setParentContactLoading] = useState(false);
   const [newNoteText, setNewNoteText] = useState("");
   const [homeworkForm, setHomeworkForm] = useState({ title: "", description: "", due_date: "" });
+
+  const [terms, setTerms] = useState<Term[]>([]);
+  const [reportCardStudent, setReportCardStudent] = useState<AttendanceStudent | null>(null);
+  const [studentReportCards, setStudentReportCards] = useState<ReportCard[]>([]);
+  const [reportCardsLoading, setReportCardsLoading] = useState(false);
+  const [editingReportCardId, setEditingReportCardId] = useState<number | null>(null);
+  const [reportCardTermId, setReportCardTermId] = useState("");
+  const [reportCardSubjects, setReportCardSubjects] = useState<SubjectFormRow[]>([emptySubjectRow()]);
+  const [reportCardsClassId, setReportCardsClassId] = useState("");
+  const [reportCardsRoster, setReportCardsRoster] = useState<AttendanceStudent[]>([]);
+  const [reportCardsRosterLoading, setReportCardsRosterLoading] = useState(false);
 
   const [features, setFeatures] = useState<Record<string, boolean>>({});
   const [reportClassId, setReportClassId] = useState<string>("");
@@ -112,11 +161,13 @@ const TeacherDashboard: React.FC = () => {
       const taskRes = await api.get("/teacher/tasks");
       const featuresRes = await api.get("/features");
       const notificationsRes = await api.get("/notifications");
+      const termsRes = await api.get("/report-cards/terms");
 
       setClasses(classRes.data.classes || []);
       setTasks(taskRes.data.tasks || []);
       setFeatures(featuresRes.data.flags || {});
       setNotifications(notificationsRes.data || []);
+      setTerms(termsRes.data.terms || []);
       setLoadError(null);
     } catch (err) {
       console.error("Teacher dashboard error:", err);
@@ -227,6 +278,150 @@ const TeacherDashboard: React.FC = () => {
   const closeNotesModal = () => {
     setNotesStudent(null);
     setStudentNotes([]);
+  };
+
+  const openParentContactModal = async (student: AttendanceStudent) => {
+    setParentContactStudent(student);
+    setParentContacts([]);
+    setParentContactLoading(true);
+
+    try {
+      const res = await api.get(
+        `/teacher/classes/${attendanceClassId}/students/${student.id}/parent-contacts`
+      );
+      setParentContacts(res.data.guardians || []);
+    } catch (err) {
+      console.error("Load parent contacts error:", err);
+      setLoadError(getErrorMessage(err, "Failed to load parent contact info"));
+    } finally {
+      setParentContactLoading(false);
+    }
+  };
+
+  const closeParentContactModal = () => {
+    setParentContactStudent(null);
+    setParentContacts([]);
+  };
+
+  const resetReportCardForm = () => {
+    setEditingReportCardId(null);
+    setReportCardTermId("");
+    setReportCardSubjects([emptySubjectRow()]);
+  };
+
+  const openReportCardModal = async (student: AttendanceStudent) => {
+    setReportCardStudent(student);
+    setStudentReportCards([]);
+    resetReportCardForm();
+    setReportCardsLoading(true);
+
+    try {
+      const res = await api.get(`/report-cards/students/${student.id}`);
+      setStudentReportCards(res.data.reportCards || []);
+    } catch (err) {
+      console.error("Load report cards error:", err);
+      setLoadError(getErrorMessage(err, "Failed to load report cards"));
+    } finally {
+      setReportCardsLoading(false);
+    }
+  };
+
+  const closeReportCardModal = () => {
+    setReportCardStudent(null);
+    setStudentReportCards([]);
+    resetReportCardForm();
+  };
+
+  const startEditReportCard = (card: ReportCard) => {
+    setEditingReportCardId(card.id);
+    setReportCardTermId(String(card.term_id));
+    setReportCardSubjects(
+      card.subjects.length > 0
+        ? card.subjects.map(s => ({ subject_name: s.subject_name, grade: s.grade, comment: s.comment || "" }))
+        : [emptySubjectRow()]
+    );
+  };
+
+  const updateSubjectRow = (index: number, field: keyof SubjectFormRow, value: string) => {
+    setReportCardSubjects(prev => prev.map((row, i) => (i === index ? { ...row, [field]: value } : row)));
+  };
+
+  const addSubjectRow = () => setReportCardSubjects(prev => [...prev, emptySubjectRow()]);
+
+  const removeSubjectRow = (index: number) =>
+    setReportCardSubjects(prev => (prev.length > 1 ? prev.filter((_, i) => i !== index) : prev));
+
+  const reloadReportCards = async () => {
+    if (!reportCardStudent) return;
+    const res = await api.get(`/report-cards/students/${reportCardStudent.id}`);
+    setStudentReportCards(res.data.reportCards || []);
+  };
+
+  const submitReportCard = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!reportCardStudent) return;
+
+    const subjects = reportCardSubjects
+      .filter(s => s.subject_name.trim() && s.grade.trim())
+      .map(s => ({ subject_name: s.subject_name.trim(), grade: s.grade.trim(), comment: s.comment.trim() || undefined }));
+
+    if (subjects.length === 0) {
+      setLoadError("At least one subject with a name and grade is required.");
+      return;
+    }
+
+    try {
+      if (editingReportCardId) {
+        await api.put(`/report-cards/${editingReportCardId}`, { subjects });
+        setSuccessMessage("Report card updated.");
+      } else {
+        if (!reportCardTermId) {
+          setLoadError("Please select a term.");
+          return;
+        }
+        await api.post(`/report-cards/students/${reportCardStudent.id}`, {
+          term_id: Number(reportCardTermId),
+          subjects
+        });
+        setSuccessMessage("Report card created.");
+      }
+      await reloadReportCards();
+      resetReportCardForm();
+    } catch (err) {
+      console.error("Save report card error:", err);
+      setLoadError(getErrorMessage(err, "Failed to save report card"));
+    }
+  };
+
+  const deleteReportCard = async (id: number) => {
+    if (!(await confirm("Are you sure you want to delete this report card?"))) return;
+
+    try {
+      await api.delete(`/report-cards/${id}`);
+      setSuccessMessage("Report card deleted.");
+      await reloadReportCards();
+      if (editingReportCardId === id) resetReportCardForm();
+    } catch (err) {
+      console.error("Delete report card error:", err);
+      setLoadError(getErrorMessage(err, "Failed to delete report card"));
+    }
+  };
+
+  const loadReportCardsRoster = async (classId: string) => {
+    setReportCardsClassId(classId);
+    setReportCardsRoster([]);
+    if (!classId) return;
+
+    setReportCardsRosterLoading(true);
+    try {
+      const res = await api.get(`/teacher/attendance/${classId}`, { params: { date: todayStr() } });
+      setReportCardsRoster(res.data.students || []);
+    } catch (err) {
+      console.error("Load class roster error:", err);
+      setLoadError(getErrorMessage(err, "Failed to load class roster"));
+    } finally {
+      setReportCardsRosterLoading(false);
+    }
   };
 
   const addNote = async (e: React.FormEvent) => {
@@ -343,6 +538,9 @@ const TeacherDashboard: React.FC = () => {
   if (features.notifications) {
     navItems = [...navItems, { key: "notifications", icon: "📣", label: "Notifications" }];
   }
+  if (features.report_cards) {
+    navItems = [...navItems, { key: "reportCards", icon: "🎓", label: "Report Cards" }];
+  }
 
   return (
     <BaseDashboard
@@ -383,7 +581,7 @@ const TeacherDashboard: React.FC = () => {
                 <tr>
                   <th style={{ textAlign: "left" }}>Class Name</th>
                   <th style={{ textAlign: "left" }}>Year Group</th>
-                  <th style={{ textAlign: "center", width: 220 }}>Actions</th>
+                  <th style={{ textAlign: "center", whiteSpace: "nowrap" }}>Actions</th>
                 </tr>
               </thead>
 
@@ -394,16 +592,16 @@ const TeacherDashboard: React.FC = () => {
                       <strong>{cls.class_name}</strong>
                     </td>
                     <td>{cls.year_group}</td>
-                    <td style={{ textAlign: "center" }}>
+                    <td style={{ textAlign: "center", whiteSpace: "nowrap" }}>
                       <button
-                        style={styles.actionBtn}
+                        style={{ ...styles.actionBtn, marginTop: 0 }}
                         onClick={() => loadAttendance(cls.id)}
                       >
                         View Attendance
                       </button>
 
                       <button
-                        style={{ ...styles.actionBtn, marginLeft: 8 }}
+                        style={{ ...styles.actionBtn, marginTop: 0, marginLeft: 8 }}
                         onClick={() => {
                           setTaskForm(prev => ({
                             ...prev,
@@ -498,7 +696,7 @@ const TeacherDashboard: React.FC = () => {
                     <tr>
                       <th style={{ textAlign: "left" }}>Student</th>
                       <th style={{ textAlign: "left" }}>Status</th>
-                      <th style={{ textAlign: "center", width: 320 }}>Actions</th>
+                      <th style={{ textAlign: "center", whiteSpace: "nowrap" }}>Actions</th>
                     </tr>
                   </thead>
 
@@ -518,7 +716,7 @@ const TeacherDashboard: React.FC = () => {
                             : "Not marked"}
                         </td>
                         <td style={{ textAlign: "center" }}>
-                          <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "center", gap: 8 }}>
+                          <div style={{ display: "flex", flexWrap: "nowrap", justifyContent: "center", gap: 8 }}>
                             <button
                               style={{
                                 ...styles.presentBtn,
@@ -550,6 +748,22 @@ const TeacherDashboard: React.FC = () => {
                                 Notes & Homework
                               </button>
                             )}
+
+                            {features.report_cards && (
+                              <button
+                                style={{ ...styles.actionBtn, marginTop: 0, marginRight: 0 }}
+                                onClick={() => openReportCardModal(st)}
+                              >
+                                Report Card
+                              </button>
+                            )}
+
+                            <button
+                              style={{ ...styles.actionBtn, marginTop: 0, marginRight: 0 }}
+                              onClick={() => openParentContactModal(st)}
+                            >
+                              Parent Contact
+                            </button>
                           </div>
                         </td>
                       </tr>
@@ -841,6 +1055,243 @@ const TeacherDashboard: React.FC = () => {
         </div>
       )}
 
+      {/* ---------------------- PARENT CONTACT MODAL ---------------------- */}
+      {parentContactStudent && (
+        <div
+          className="modal-overlay"
+          style={{
+            position: "fixed",
+            top: 0,
+            left: 0,
+            width: "100vw",
+            height: "100vh",
+            background: "rgba(0,0,0,0.5)",
+            display: "flex",
+            justifyContent: "center",
+            alignItems: "center",
+            zIndex: 9999,
+            padding: 16
+          }}
+        >
+          <div
+            style={{
+              background: "white",
+              padding: 24,
+              borderRadius: 12,
+              width: "100%",
+              maxWidth: 520,
+              maxHeight: "85vh",
+              overflowY: "auto",
+              boxShadow: "0 4px 20px rgba(0,0,0,0.2)"
+            }}
+          >
+            <h3 style={{ marginBottom: 16 }}>
+              {parentContactStudent.first_name} {parentContactStudent.surname} — Parent Contact
+            </h3>
+
+            {parentContactLoading ? (
+              <p style={styles.text}>Loading contact info...</p>
+            ) : parentContacts.length === 0 ? (
+              <p style={styles.text}>No approved guardian on record.</p>
+            ) : (
+              parentContacts.map((g, gIdx) => (
+                <div key={gIdx} style={{ marginBottom: 16 }}>
+                  <h4 style={{ fontSize: 18, marginBottom: 10, color: "#4c1d95" }}>
+                    Guardian {gIdx + 1}
+                  </h4>
+                  <div>
+                    <strong>Name:</strong> {g.first_name} {g.surname}
+                  </div>
+                  <div>
+                    <strong>Relationship:</strong> {g.relationship_to_student || "—"}
+                  </div>
+                  <div>
+                    <strong>Phone Number:</strong> {g.contact_number || "—"}
+                  </div>
+                  <div>
+                    <strong>Email:</strong> {g.email || "—"}
+                  </div>
+                </div>
+              ))
+            )}
+
+            <button
+              onClick={closeParentContactModal}
+              style={{
+                marginTop: 20,
+                background: "#334155",
+                color: "white",
+                border: "none",
+                padding: "8px 16px",
+                borderRadius: 6,
+                cursor: "pointer",
+                width: "100%"
+              }}
+            >
+              Close
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ---------------------- REPORT CARD MODAL ---------------------- */}
+      {reportCardStudent && (
+        <div
+          className="modal-overlay"
+          style={{
+            position: "fixed",
+            top: 0,
+            left: 0,
+            width: "100vw",
+            height: "100vh",
+            background: "rgba(0,0,0,0.5)",
+            display: "flex",
+            justifyContent: "center",
+            alignItems: "center",
+            zIndex: 9999,
+            padding: 16
+          }}
+        >
+          <div
+            style={{
+              background: "white",
+              padding: 24,
+              borderRadius: 12,
+              width: "100%",
+              maxWidth: 560,
+              maxHeight: "85vh",
+              overflowY: "auto",
+              boxShadow: "0 4px 20px rgba(0,0,0,0.2)"
+            }}
+          >
+            <h3 style={{ marginBottom: 16 }}>
+              Report Cards — {reportCardStudent.first_name} {reportCardStudent.surname}
+            </h3>
+
+            {reportCardsLoading ? (
+              <p style={styles.text}>Loading report cards...</p>
+            ) : studentReportCards.length === 0 ? (
+              <p style={styles.text}>No report cards yet.</p>
+            ) : (
+              <ul style={{ ...styles.list, marginBottom: 16 }}>
+                {studentReportCards.map(card => (
+                  <li key={card.id} style={styles.listItem}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                      <strong>{card.term_name}</strong>
+                      <div>
+                        <button style={{ ...styles.secondaryBtn, marginRight: 6 }} onClick={() => startEditReportCard(card)}>
+                          Edit
+                        </button>
+                        <button
+                          style={{ ...styles.secondaryBtn, background: "#dc2626", color: "#fff" }}
+                          onClick={() => deleteReportCard(card.id)}
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </div>
+                    {card.subjects.map(s => (
+                      <div key={s.id} style={{ fontSize: 14, marginTop: 4 }}>
+                        <strong>{s.subject_name}:</strong> {s.grade}
+                        {s.comment && <div style={{ fontSize: 13, color: "#64748b" }}>{s.comment}</div>}
+                      </div>
+                    ))}
+                  </li>
+                ))}
+              </ul>
+            )}
+
+            <h4 style={{ marginBottom: 8 }}>{editingReportCardId ? "Edit Report Card" : "Add Report Card"}</h4>
+
+            <form onSubmit={submitReportCard} style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              {!editingReportCardId && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                  <label style={{ fontWeight: 600 }}>Term</label>
+                  <select
+                    value={reportCardTermId}
+                    onChange={e => setReportCardTermId(e.target.value)}
+                    style={styles.input}
+                    required
+                  >
+                    <option value="">Select a term...</option>
+                    {terms.map(t => (
+                      <option key={t.id} value={t.id}>
+                        {t.name}
+                      </option>
+                    ))}
+                  </select>
+                  {terms.length === 0 && (
+                    <span style={{ fontSize: 13, color: "#94a3b8" }}>No terms set up yet — ask an admin to create one.</span>
+                  )}
+                </div>
+              )}
+
+              {reportCardSubjects.map((row, i) => (
+                <div key={i} style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+                  <input
+                    value={row.subject_name}
+                    onChange={e => updateSubjectRow(i, "subject_name", e.target.value)}
+                    style={{ ...styles.input, flex: 2 }}
+                    placeholder="Subject"
+                  />
+                  <input
+                    value={row.grade}
+                    onChange={e => updateSubjectRow(i, "grade", e.target.value)}
+                    style={{ ...styles.input, flex: 1 }}
+                    placeholder="Grade"
+                  />
+                  <input
+                    value={row.comment}
+                    onChange={e => updateSubjectRow(i, "comment", e.target.value)}
+                    style={{ ...styles.input, flex: 3 }}
+                    placeholder="Comment (optional)"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => removeSubjectRow(i)}
+                    style={{ ...styles.secondaryBtn, marginTop: 0 }}
+                    aria-label="Remove subject"
+                  >
+                    ×
+                  </button>
+                </div>
+              ))}
+
+              <button type="button" onClick={addSubjectRow} style={{ ...styles.secondaryBtn, alignSelf: "flex-start" }}>
+                + Add Subject
+              </button>
+
+              <div style={{ display: "flex", gap: 8 }}>
+                <button style={{ ...styles.actionBtn, marginTop: 0 }}>
+                  {editingReportCardId ? "Save Changes" : "Create Report Card"}
+                </button>
+                {editingReportCardId && (
+                  <button type="button" onClick={resetReportCardForm} style={{ ...styles.secondaryBtn, marginTop: 0 }}>
+                    Cancel Edit
+                  </button>
+                )}
+              </div>
+            </form>
+
+            <button
+              onClick={closeReportCardModal}
+              style={{
+                marginTop: 20,
+                background: "#334155",
+                color: "white",
+                border: "none",
+                padding: "8px 16px",
+                borderRadius: 6,
+                cursor: "pointer",
+                width: "100%"
+              }}
+            >
+              Close
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* ---------------------- TASKS SECTION ---------------------- */}
       {selectedSection === "tasks" && (
         <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
@@ -1056,6 +1507,69 @@ const TeacherDashboard: React.FC = () => {
               })}
             </div>
           )}
+        </div>
+      )}
+
+      {/* ---------------------- REPORT CARDS SECTION ---------------------- */}
+      {selectedSection === "reportCards" && features.report_cards && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
+          <div style={styles.card}>
+            <h3 style={{ marginBottom: 16 }}>Report Cards</h3>
+            <p style={{ ...styles.text, fontSize: 13, color: "#64748b" }}>
+              Pick a class to see its students, then manage report cards for one of them.
+            </p>
+
+            <div style={{ display: "flex", flexDirection: "column", gap: 6, maxWidth: 320 }}>
+              <label style={{ fontWeight: 600 }}>Class</label>
+              <select
+                value={reportCardsClassId}
+                onChange={e => loadReportCardsRoster(e.target.value)}
+                style={styles.input}
+              >
+                <option value="">Select a class...</option>
+                {classes.map(cls => (
+                  <option key={cls.id} value={cls.id}>
+                    {cls.class_name}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            {reportCardsClassId && (
+              <div style={{ marginTop: 20, overflowX: "auto" }}>
+                {reportCardsRosterLoading ? (
+                  <p style={styles.text}>Loading students...</p>
+                ) : reportCardsRoster.length === 0 ? (
+                  <p style={styles.text}>No students in this class.</p>
+                ) : (
+                  <table style={{ ...styles.table, width: "100%" }}>
+                    <thead>
+                      <tr>
+                        <th style={{ textAlign: "left" }}>Student Name</th>
+                        <th style={{ textAlign: "center", width: 160 }}>Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {reportCardsRoster.map(st => (
+                        <tr key={st.id}>
+                          <td>
+                            <strong>
+                              {st.first_name} {st.surname}
+                            </strong>
+                          </td>
+                          <td style={{ textAlign: "center" }}>
+                            <button style={{ ...styles.actionBtn, marginTop: 0 }} onClick={() => openReportCardModal(st)}>
+                              Report Card
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+            )}
+          </div>
         </div>
       )}
     </BaseDashboard>

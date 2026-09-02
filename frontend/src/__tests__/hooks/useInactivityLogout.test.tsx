@@ -15,7 +15,7 @@ import { AuthContext } from "../../AuthContext";
 const INACTIVITY_LIMIT_MS = 15 * 60 * 1000;
 
 const renderWithUser = (user: any, logout = vi.fn().mockResolvedValue(undefined)) => {
-  const value = { user, loading: false, login: vi.fn(), logout };
+  const value = { user, loading: false, login: vi.fn(), logout, refreshUser: vi.fn() };
   const result = renderHook(() => useInactivityLogout(), {
     wrapper: ({ children }) => <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
   });

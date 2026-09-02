@@ -244,6 +244,60 @@ describe("DELETE /api/teacher/tasks/:id", () => {
   });
 });
 
+describe("GET /api/teacher/classes/:classId/students/:studentId/parent-contacts", () => {
+  it("403s when the teacher does not own the class", async () => {
+    mockQuery.mockResolvedValueOnce(rows([])); // ownsClass -> false
+
+    const res = await request(app)
+      .get("/api/teacher/classes/1/students/5/parent-contacts")
+      .set("Cookie", teacherCookie);
+
+    expect(res.status).toBe(403);
+  });
+
+  it("400s when the student is not in the class", async () => {
+    mockQuery
+      .mockResolvedValueOnce(rows([{ x: 1 }])) // ownsClass
+      .mockResolvedValueOnce(rows([])); // student not in class
+
+    const res = await request(app)
+      .get("/api/teacher/classes/1/students/5/parent-contacts")
+      .set("Cookie", teacherCookie);
+
+    expect(res.status).toBe(400);
+  });
+
+  it("returns approved guardians and logs a view", async () => {
+    mockQuery
+      .mockResolvedValueOnce(rows([{ x: 1 }])) // ownsClass
+      .mockResolvedValueOnce(rows([{ x: 1 }])) // student in class
+      .mockResolvedValueOnce(
+        rows([
+          {
+            first_name: "Aisha",
+            middle_name: null,
+            surname: "Khan",
+            relationship_to_student: "mother",
+            contact_number: "07123456789",
+            email: "aisha.khan@example.com"
+          }
+        ])
+      ) // guardian query
+      .mockResolvedValueOnce(rows({})); // audit insert
+
+    const res = await request(app)
+      .get("/api/teacher/classes/1/students/5/parent-contacts")
+      .set("Cookie", teacherCookie);
+
+    expect(res.status).toBe(200);
+    expect(res.body.guardians).toHaveLength(1);
+    expect(res.body.guardians[0].email).toBe("aisha.khan@example.com");
+
+    expect(mockQuery.mock.calls[3][0]).toContain("INSERT INTO parent_contact_view_log");
+    expect(mockQuery.mock.calls[3][1]).toEqual([1, 5, 1, 10]);
+  });
+});
+
 describe("GET /api/teacher/tasks", () => {
   it("returns the teacher's tasks", async () => {
     mockQuery.mockResolvedValueOnce(rows([{ id: 1, title: "HW" }]));

@@ -25,7 +25,8 @@ type SectionKey =
   | "users"
   | "roles"
   | "features"
-  | "notifications";
+  | "notifications"
+  | "passwordManagement";
 
 const NAV_ITEMS: DashboardNavItem[] = [
   { key: "dashboard", icon: "🏠", label: "Dashboard" },
@@ -38,7 +39,8 @@ const NAV_ITEMS: DashboardNavItem[] = [
   { key: "users", icon: "👑", label: "All Users" },
   { key: "roles", icon: "➕", label: "Roles" },
   { key: "features", icon: "🚦", label: "Feature Toggles" },
-  { key: "notifications", icon: "📣", label: "Notifications" }
+  { key: "notifications", icon: "📣", label: "Notifications" },
+  { key: "passwordManagement", icon: "🔑", label: "Password Management" }
 ];
 
 const SECTION_TITLES: Record<SectionKey, string> = {
@@ -52,7 +54,8 @@ const SECTION_TITLES: Record<SectionKey, string> = {
   users: "All Users",
   roles: "Roles",
   features: "Feature Toggles",
-  notifications: "Notifications"
+  notifications: "Notifications",
+  passwordManagement: "Password Management"
 };
 
 interface SchoolItem {
@@ -84,6 +87,35 @@ interface FeatureFlagOverride {
   enabled: boolean | number;
 }
 
+interface FeatureFlagAuditLogEntry {
+  id: number;
+  feature_flag_id: number | null;
+  feature_key: string;
+  school_id: number | null;
+  school_name: string | null;
+  action: string;
+  actor_username: string;
+  details: Record<string, unknown> | null;
+  created_at: string;
+}
+
+const describeAuditEntry = (entry: FeatureFlagAuditLogEntry) => {
+  switch (entry.action) {
+    case "flag_created":
+      return `created the "${entry.feature_key}" flag`;
+    case "flag_updated":
+      return `updated the "${entry.feature_key}" flag`;
+    case "flag_deleted":
+      return `deleted the "${entry.feature_key}" flag`;
+    case "school_override_set":
+      return `${entry.details?.enabled ? "enabled" : "disabled"} "${entry.feature_key}" for ${entry.school_name || "a school"}`;
+    case "school_override_cleared":
+      return `reset "${entry.feature_key}" to default for ${entry.school_name || "a school"}`;
+    default:
+      return `${entry.action} on "${entry.feature_key}"`;
+  }
+};
+
 const toDatetimeLocal = (value: string | null) => {
   if (!value) return "";
   // MySQL DATETIME comes back as "YYYY-MM-DD HH:MM:SS" (or a full ISO string
@@ -105,6 +137,10 @@ const SystemAdminDashboard: React.FC = () => {
   const [users, setUsers] = useState<any[]>([]);
   const [roles, setRoles] = useState<RoleItem[]>([]);
   const [editingClass, setEditingClass] = useState<any | null>(null);
+
+  const [parents, setParents] = useState<any[]>([]);
+  const [guardianRequests, setGuardianRequests] = useState<any[]>([]);
+  const [assignGuardianParentId, setAssignGuardianParentId] = useState<Record<number, string>>({});
 
   const [assignStudentClassId, setAssignStudentClassId] = useState("");
   const [assignStudentId, setAssignStudentId] = useState("");
@@ -159,6 +195,7 @@ const SystemAdminDashboard: React.FC = () => {
 
   const [featureFlags, setFeatureFlags] = useState<FeatureFlag[]>([]);
   const [featureFlagOverrides, setFeatureFlagOverrides] = useState<FeatureFlagOverride[]>([]);
+  const [featureFlagAuditLog, setFeatureFlagAuditLog] = useState<FeatureFlagAuditLogEntry[]>([]);
   const [flagExpiryDrafts, setFlagExpiryDrafts] = useState<Record<number, string>>({});
   const [newFlagKey, setNewFlagKey] = useState("");
   const [newFlagName, setNewFlagName] = useState("");
@@ -175,7 +212,7 @@ const SystemAdminDashboard: React.FC = () => {
 
   const loadAll = async () => {
     try {
-      const [schoolsRes, classRes, teacherRes, spRes, pendingRes, assignedRes, allUsersRes, rolesRes, flagsRes, sentNotificationsRes] =
+      const [schoolsRes, classRes, teacherRes, spRes, pendingRes, assignedRes, allUsersRes, rolesRes, flagsRes, auditLogRes, sentNotificationsRes, parentsRes, guardianRequestsRes] =
         await Promise.all([
           api.get("/system-admin/schools"),
           api.get("/admin/classes"),
@@ -186,7 +223,10 @@ const SystemAdminDashboard: React.FC = () => {
           api.get("/admin/users-all"),
           api.get("/admin/roles"),
           api.get("/system-admin/feature-flags"),
-          api.get("/notifications/sent")
+          api.get("/system-admin/feature-flags/audit-log"),
+          api.get("/notifications/sent"),
+          api.get("/admin/parents"),
+          api.get("/admin/guardian-requests")
         ]);
 
       setSchools(schoolsRes.data || []);
@@ -199,7 +239,10 @@ const SystemAdminDashboard: React.FC = () => {
       setRoles((rolesRes.data || []).filter((r: RoleItem) => r.name !== "pending"));
       setFeatureFlags(flagsRes.data?.flags || []);
       setFeatureFlagOverrides(flagsRes.data?.overrides || []);
+      setFeatureFlagAuditLog(auditLogRes.data || []);
       setSentNotifications(sentNotificationsRes.data || []);
+      setParents(parentsRes.data || []);
+      setGuardianRequests(guardianRequestsRes.data || []);
       setLoadError(null);
     } catch (err) {
       console.error("Failed to load system admin data", err);
@@ -425,9 +468,17 @@ const SystemAdminDashboard: React.FC = () => {
     }
 
     try {
-      await api.post(`/admin/approve/${userId}`, { role });
+      const res = await api.post(`/admin/approve/${userId}`, { role });
       loadAll();
-      setSuccessMessage("User approved successfully.");
+      const studentAccounts = res.data.studentAccounts || [];
+      if (studentAccounts.length > 0) {
+        const creds = studentAccounts
+          .map((s: any) => `${s.name} — username: ${s.username}, one-time password: ${s.temporaryPassword}`)
+          .join("; ");
+        setSuccessMessage(`User approved successfully. Student login(s) created: ${creds} — share these directly, they won't be shown again.`);
+      } else {
+        setSuccessMessage("User approved successfully.");
+      }
     } catch (err) {
       console.error("Approve user error:", err);
       setLoadError(getErrorMessage(err, "Failed to approve user"));
@@ -470,6 +521,103 @@ const SystemAdminDashboard: React.FC = () => {
     } catch (err) {
       console.error("Remove parent error:", err);
       setLoadError(getErrorMessage(err, "Failed to remove parent"));
+    }
+  };
+
+  const handleResetPassword = async (userId: number, label: string) => {
+    if (!(await confirm(`Reset ${label}'s password? A new one-time password will be generated.`))) return;
+
+    try {
+      const res = await api.post(`/admin/users/${userId}/reset-password`);
+      setSuccessMessage(
+        `Password reset for ${label}. One-time password: ${res.data.temporaryPassword} — share this with them directly, it won't be shown again.`
+      );
+    } catch (err) {
+      console.error("Reset password error:", err);
+      setLoadError(getErrorMessage(err, "Failed to reset password"));
+    }
+  };
+
+  // system_admin can only reach owner accounts through this endpoint — every
+  // other role's password is reset via /admin/users/:id/reset-password above.
+  const handleResetOwnerPassword = async (userId: number, label: string) => {
+    if (!(await confirm(`Reset ${label}'s password? A new one-time password will be generated.`))) return;
+
+    try {
+      const res = await api.post(`/system-admin/owners/${userId}/reset-password`);
+      setSuccessMessage(
+        `Password reset for ${label}. One-time password: ${res.data.temporaryPassword} — share this with them directly, it won't be shown again.`
+      );
+    } catch (err) {
+      console.error("Reset owner password error:", err);
+      setLoadError(getErrorMessage(err, "Failed to reset password"));
+    }
+  };
+
+  const handleGenerateStudentLogin = async (studentId: number, label: string) => {
+    if (!(await confirm(`Generate a login for ${label}? A one-time password will be created.`))) return;
+
+    try {
+      const res = await api.post(`/admin/students/${studentId}/generate-login`);
+      setSuccessMessage(
+        `Login created for ${label}. Username: ${res.data.username}. One-time password: ${res.data.temporaryPassword} — share this with them directly, it won't be shown again.`
+      );
+      await loadAll();
+    } catch (err) {
+      console.error("Generate student login error:", err);
+      setLoadError(getErrorMessage(err, "Failed to generate login"));
+    }
+  };
+
+  const assignGuardian = async (studentId: number) => {
+    const parentId = assignGuardianParentId[studentId];
+    if (!parentId) return;
+
+    try {
+      await api.post(`/admin/students/${studentId}/assign-guardian`, { parent_id: Number(parentId) });
+      setAssignGuardianParentId(prev => ({ ...prev, [studentId]: "" }));
+      await loadAll();
+      setSuccessMessage("Guardian assigned.");
+    } catch (err) {
+      console.error("Assign guardian error:", err);
+      setLoadError(getErrorMessage(err, "Failed to assign guardian"));
+    }
+  };
+
+  const removeGuardian = async (studentId: number, parentId: number) => {
+    if (!(await confirm("Remove this guardian from the student?"))) return;
+
+    try {
+      await api.post(`/admin/students/${studentId}/remove-guardian`, { parent_id: parentId });
+      await loadAll();
+      setSuccessMessage("Guardian removed.");
+    } catch (err) {
+      console.error("Remove guardian error:", err);
+      setLoadError(getErrorMessage(err, "Failed to remove guardian"));
+    }
+  };
+
+  const approveGuardianRequest = async (studentId: number, parentId: number) => {
+    try {
+      await api.post("/admin/guardian-requests/approve", { student_id: studentId, parent_id: parentId });
+      await loadAll();
+      setSuccessMessage("Guardian request approved.");
+    } catch (err) {
+      console.error("Approve guardian request error:", err);
+      setLoadError(getErrorMessage(err, "Failed to approve guardian request"));
+    }
+  };
+
+  const rejectGuardianRequest = async (studentId: number, parentId: number) => {
+    if (!(await confirm("Reject this guardian link request?"))) return;
+
+    try {
+      await api.post("/admin/guardian-requests/reject", { student_id: studentId, parent_id: parentId });
+      await loadAll();
+      setSuccessMessage("Guardian request rejected.");
+    } catch (err) {
+      console.error("Reject guardian request error:", err);
+      setLoadError(getErrorMessage(err, "Failed to reject guardian request"));
     }
   };
 
@@ -1317,6 +1465,12 @@ const SystemAdminDashboard: React.FC = () => {
 
                           <td style={{ textAlign: "center" }}>
                             <button
+                              onClick={() => handleResetPassword(t.id, t.username)}
+                              style={{ ...styles.secondaryBtn, marginRight: 6 }}
+                            >
+                              Reset Password
+                            </button>
+                            <button
                               onClick={() => handleDeleteTeacher(t.id)}
                               style={{
                                 background: "#dc2626",
@@ -1521,28 +1675,118 @@ const SystemAdminDashboard: React.FC = () => {
                                       color: "#4c1d95"
                                     }}
                                   >
-                                    Parent Details
+                                    Guardian Code
                                   </h4>
+                                  <div>{row.student_guardian_code || "—"}</div>
+                                </div>
 
-                                  <div>
-                                    <strong>Name:</strong>{" "}
-                                    {row.parent_first_name}{" "}
-                                    {row.parent_last_name}
+                                <hr style={{ margin: "20px 0" }} />
+
+                                <div>
+                                  <h4
+                                    style={{
+                                      fontSize: 18,
+                                      marginBottom: 10,
+                                      color: "#4c1d95"
+                                    }}
+                                  >
+                                    Login
+                                  </h4>
+                                  {row.student_user_id ? (
+                                    <button
+                                      style={styles.secondaryBtn}
+                                      onClick={() =>
+                                        handleResetPassword(row.student_user_id, `${row.student_first_name} ${row.student_last_name}`)
+                                      }
+                                    >
+                                      Reset Password
+                                    </button>
+                                  ) : (
+                                    <button
+                                      style={styles.secondaryBtn}
+                                      onClick={() =>
+                                        handleGenerateStudentLogin(studentId, `${row.student_first_name} ${row.student_last_name}`)
+                                      }
+                                    >
+                                      Generate Login
+                                    </button>
+                                  )}
+                                </div>
+
+                                <hr style={{ margin: "20px 0" }} />
+
+                                {(row.guardians || []).map((g: any, gIdx: number) => (
+                                  <div key={g.parent_id} style={{ marginBottom: 16 }}>
+                                    <h4
+                                      style={{
+                                        fontSize: 18,
+                                        marginBottom: 10,
+                                        color: "#4c1d95",
+                                        display: "flex",
+                                        justifyContent: "space-between",
+                                        alignItems: "center"
+                                      }}
+                                    >
+                                      Guardian {gIdx + 1}
+                                      {(row.guardians || []).length > 1 && (
+                                        <button
+                                          style={{ ...styles.secondaryBtn, background: "#dc2626", color: "#fff" }}
+                                          onClick={() => removeGuardian(studentId, g.parent_id)}
+                                        >
+                                          Remove
+                                        </button>
+                                      )}
+                                    </h4>
+
+                                    <div>
+                                      <strong>Name:</strong> {g.first_name} {g.surname}
+                                    </div>
+                                    <div>
+                                      <strong>Email:</strong> {g.email}
+                                    </div>
+                                    <div>
+                                      <strong>Relationship:</strong> {g.relationship_to_student || "—"}
+                                    </div>
+                                    <div>
+                                      <strong>Phone Number:</strong> {g.contact_number || "—"}
+                                    </div>
+                                    <div>
+                                      <strong>Medical Notes:</strong> {g.medical_condition || "—"}
+                                    </div>
                                   </div>
-                                  <div>
-                                    <strong>Email:</strong> {row.parent_email}
-                                  </div>
-                                  <div>
-                                    <strong>Relationship:</strong>{" "}
-                                    {row.parent_relationship || "—"}
-                                  </div>
-                                  <div>
-                                    <strong>Phone Number:</strong>{" "}
-                                    {row.parent_contact_number || "—"}
-                                  </div>
-                                  <div>
-                                    <strong>Medical Notes:</strong>{" "}
-                                    {row.parent_medical_condition || "—"}
+                                ))}
+
+                                <hr style={{ margin: "20px 0" }} />
+
+                                <div>
+                                  <h4 style={{ fontSize: 16, marginBottom: 8, color: "#4c1d95" }}>
+                                    Assign Another Guardian
+                                  </h4>
+                                  <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                                    <select
+                                      style={styles.input}
+                                      value={assignGuardianParentId[studentId] || ""}
+                                      onChange={e =>
+                                        setAssignGuardianParentId(prev => ({ ...prev, [studentId]: e.target.value }))
+                                      }
+                                    >
+                                      <option value="">Select an existing parent...</option>
+                                      {parents
+                                        .filter((p: any) => p.parent_school_id === row.student_school_id)
+                                        .filter((p: any) => !(row.guardians || []).some((g: any) => g.parent_id === p.parent_id))
+                                        .map((p: any) => (
+                                          <option key={p.parent_id} value={p.parent_id}>
+                                            {p.parent_first_name} {p.parent_last_name}
+                                          </option>
+                                        ))}
+                                    </select>
+                                    <button
+                                      style={styles.actionBtn}
+                                      disabled={!assignGuardianParentId[studentId]}
+                                      onClick={() => assignGuardian(studentId)}
+                                    >
+                                      Assign
+                                    </button>
                                   </div>
                                 </div>
                               </div>
@@ -1754,6 +1998,58 @@ const SystemAdminDashboard: React.FC = () => {
               }
             />
           </div>
+
+          <div style={styles.card}>
+            <h3 style={{ marginBottom: 16 }}>Guardian Requests</h3>
+            <p style={{ ...styles.text, fontSize: 13, color: "#64748b" }}>
+              Self-service requests from an already-approved parent asking to link as an additional
+              guardian on a child that isn't theirs yet.
+            </p>
+
+            {guardianRequests.length === 0 ? (
+              <p style={styles.text}>No pending guardian requests.</p>
+            ) : (
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ ...styles.table, width: "100%" }}>
+                  <thead>
+                    <tr>
+                      <th style={{ textAlign: "left" }}>Student</th>
+                      <th style={{ textAlign: "left" }}>Requesting Parent</th>
+                      <th style={{ textAlign: "left" }}>Email</th>
+                      <th style={{ textAlign: "center", width: 180 }}>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {guardianRequests.map((r: any) => (
+                      <tr key={`${r.student_id}-${r.parent_id}`}>
+                        <td>
+                          {r.student_first_name} {r.student_last_name}
+                        </td>
+                        <td>
+                          {r.parent_first_name} {r.parent_last_name}
+                        </td>
+                        <td>{r.parent_email}</td>
+                        <td style={{ textAlign: "center" }}>
+                          <button
+                            style={{ ...styles.secondaryBtn, marginRight: 6 }}
+                            onClick={() => approveGuardianRequest(r.student_id, r.parent_id)}
+                          >
+                            Approve
+                          </button>
+                          <button
+                            style={{ ...styles.secondaryBtn, background: "#dc2626", color: "#fff" }}
+                            onClick={() => rejectGuardianRequest(r.student_id, r.parent_id)}
+                          >
+                            Reject
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
         </div>
       )}
 
@@ -1848,13 +2144,14 @@ const SystemAdminDashboard: React.FC = () => {
 
                 <tbody>
                   {studentsParents
-                    .filter((row: any) =>
-                      (
-                        `${row.student_first_name} ${row.student_last_name} ${row.parent_first_name} ${row.parent_last_name}`
-                      )
+                    .filter((row: any) => {
+                      const guardianNames = (row.guardians || [])
+                        .map((g: any) => `${g.first_name} ${g.surname}`)
+                        .join(" ");
+                      return `${row.student_first_name} ${row.student_last_name} ${guardianNames}`
                         .toLowerCase()
-                        .includes(searchRemove.toLowerCase())
-                    )
+                        .includes(searchRemove.toLowerCase());
+                    })
                     .map((row: any) => (
                       <tr key={row.student_id}>
                         <td>
@@ -1864,10 +2161,12 @@ const SystemAdminDashboard: React.FC = () => {
                         </td>
 
                         <td>
-                          {row.parent_first_name} {row.parent_last_name}
+                          {(row.guardians || []).map((g: any) => `${g.first_name} ${g.surname}`).join(", ") || "—"}
                         </td>
 
-                        <td>{row.parent_contact_number || "—"}</td>
+                        <td>
+                          {(row.guardians || []).map((g: any) => g.contact_number).filter(Boolean).join(", ") || "—"}
+                        </td>
 
                         <td style={{ textAlign: "center" }}>
                           <button
@@ -1886,20 +2185,33 @@ const SystemAdminDashboard: React.FC = () => {
                             Remove Student
                           </button>
 
-                          <button
-                            onClick={() => handleRemoveParent(row.parent_id)}
-                            style={{
-                              background: "#b91c1c",
-                              color: "white",
-                              border: "none",
-                              padding: "6px 8px",
-                              borderRadius: 6,
-                              cursor: "pointer",
-                              fontSize: 14
-                            }}
-                          >
-                            Remove Parent
-                          </button>
+                          {(row.guardians || []).map((g: any) => (
+                            <React.Fragment key={g.parent_id}>
+                              {g.user_id && (
+                                <button
+                                  onClick={() => handleResetPassword(g.user_id, `${g.first_name} ${g.surname}`)}
+                                  style={{ ...styles.secondaryBtn, marginRight: 4 }}
+                                >
+                                  Reset {g.first_name}'s Password
+                                </button>
+                              )}
+                              <button
+                                onClick={() => handleRemoveParent(g.parent_id)}
+                                style={{
+                                  background: "#b91c1c",
+                                  color: "white",
+                                  border: "none",
+                                  padding: "6px 8px",
+                                  borderRadius: 6,
+                                  cursor: "pointer",
+                                  fontSize: 14,
+                                  marginRight: 4
+                                }}
+                              >
+                                Remove {g.first_name}
+                              </button>
+                            </React.Fragment>
+                          ))}
                         </td>
                       </tr>
                     ))}
@@ -1977,6 +2289,7 @@ const SystemAdminDashboard: React.FC = () => {
                             display: "flex",
                             gap: 8,
                             justifyContent: "center",
+                            alignItems: "center",
                             flexWrap: "wrap"
                           }}
                         >
@@ -1987,7 +2300,7 @@ const SystemAdminDashboard: React.FC = () => {
                               padding: "6px 8px",
                               borderRadius: 6,
                               border: "1px solid #cbd5e1",
-                              minWidth: 130
+                              width: 130
                             }}
                             onChange={(e) => {
                               if (e.target.value) grantRole(u.id, e.target.value);
@@ -2001,8 +2314,10 @@ const SystemAdminDashboard: React.FC = () => {
                             ))}
                           </select>
 
-                          {/* VIEW & EDIT — HIDDEN FOR STUDENT USERS */}
-                          {u.role !== "student" && (
+                          {/* VIEW & EDIT — a same-size placeholder keeps Delete's
+                              position consistent across rows for student users,
+                              who don't get this button */}
+                          {u.role !== "student" ? (
                             <button
                               onClick={() => {
                                 setExpandedRows(prev => ({
@@ -2034,11 +2349,14 @@ const SystemAdminDashboard: React.FC = () => {
                                 padding: "6px 10px",
                                 borderRadius: 6,
                                 cursor: "pointer",
-                                fontSize: 13
+                                fontSize: 13,
+                                width: 92
                               }}
                             >
                               View & Edit
                             </button>
+                          ) : (
+                            <span style={{ width: 92 }} aria-hidden="true" />
                           )}
 
                           {/* DELETE USER */}
@@ -2050,7 +2368,8 @@ const SystemAdminDashboard: React.FC = () => {
                               border: "none",
                               borderRadius: 6,
                               cursor: "pointer",
-                              fontSize: 13
+                              fontSize: 13,
+                              width: 72
                             }}
                             onClick={() => deleteUser(u.id)}
                           >
@@ -2632,6 +2951,37 @@ const SystemAdminDashboard: React.FC = () => {
               </div>
             )}
           </div>
+
+          <div style={styles.card}>
+            <h3 style={{ marginBottom: 16 }}>Audit Log</h3>
+
+            {featureFlagAuditLog.length === 0 ? (
+              <p style={styles.text}>No feature toggle changes yet.</p>
+            ) : (
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ ...styles.table, width: "100%" }}>
+                  <thead>
+                    <tr>
+                      <th style={{ textAlign: "left" }}>When</th>
+                      <th style={{ textAlign: "left" }}>Who</th>
+                      <th style={{ textAlign: "left" }}>What</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {featureFlagAuditLog.map(entry => (
+                      <tr key={entry.id}>
+                        <td style={{ whiteSpace: "nowrap", fontSize: 13, color: "#64748b" }}>
+                          {new Date(entry.created_at.replace(" ", "T")).toLocaleString()}
+                        </td>
+                        <td style={{ fontWeight: 600 }}>{entry.actor_username}</td>
+                        <td>{describeAuditEntry(entry)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
         </div>
       )}
 
@@ -2751,6 +3101,49 @@ const SystemAdminDashboard: React.FC = () => {
                 </table>
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* ---------------------- PASSWORD MANAGEMENT SECTION ---------------------- */}
+      {selectedSection === "passwordManagement" && (
+        <div style={styles.card}>
+          <h3 style={{ marginBottom: 16 }}>Owners</h3>
+          <p style={{ ...styles.text, fontSize: 13, color: "#64748b", marginBottom: 16 }}>
+            System admins can only reset owner accounts here — teacher and parent
+            password resets are handled from Teacher Management and Student & Parent
+            Overview.
+          </p>
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ ...styles.table, width: "100%" }}>
+              <thead>
+                <tr>
+                  <th style={{ textAlign: "left" }}>Username</th>
+                  <th style={{ textAlign: "left" }}>Email</th>
+                  <th style={{ textAlign: "left" }}>School</th>
+                  <th style={{ textAlign: "center", width: 140 }}>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {users
+                  .filter((u: any) => u.role === "owner")
+                  .map((u: any) => (
+                    <tr key={u.id}>
+                      <td><strong>{u.username}</strong></td>
+                      <td>{u.email || "—"}</td>
+                      <td>{u.school_name || "—"}</td>
+                      <td style={{ textAlign: "center" }}>
+                        <button
+                          onClick={() => handleResetOwnerPassword(u.id, u.username)}
+                          style={styles.secondaryBtn}
+                        >
+                          Reset Password
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+              </tbody>
+            </table>
           </div>
         </div>
       )}

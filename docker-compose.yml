@@ -6,16 +6,67 @@ services:
     container_name: ilm_db
     restart: always
     environment:
-      MYSQL_ROOT_PASSWORD: rootpassword
-      MYSQL_DATABASE: ilm
-      MYSQL_USER: ilmuser
-      MYSQL_PASSWORD: ilmpassword
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
     ports:
       - "3306:3306"
     volumes:
       - db_data:/var/lib/mysql
-      - ./mysql:/docker-entrypoint-initdb.d:ro
     command: ["--default-authentication-plugin=mysql_native_password"]
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p${MYSQL_ROOT_PASSWORD}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
+  liquibase:
+    image: liquibase/liquibase:4.29
+    container_name: ilm_liquibase
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      # Native Liquibase env vars (4.24+) — read by *any* invocation of the
+      # `liquibase` binary, so ad-hoc commands don't need to repeat
+      # --url/--username/--password/--changelog-file by hand, e.g.:
+      #   docker compose run --rm liquibase status --verbose
+      #   docker compose run --rm liquibase rollback-count 1
+      LIQUIBASE_COMMAND_URL: "jdbc:mysql://db:3306/${MYSQL_DATABASE}?allowPublicKeyRetrieval=true&useSSL=false"
+      LIQUIBASE_COMMAND_USERNAME: root
+      LIQUIBASE_COMMAND_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      LIQUIBASE_COMMAND_CHANGELOG_FILE: changelog/changelog-master.xml
+    volumes:
+      - ./liquibase/changelog:/liquibase/changelog
+      - ./liquibase/drivers:/liquibase/lib
+    # No entrypoint override here on purpose: the image's own
+    # docker-entrypoint.sh treats a first arg it recognizes as a real OS
+    # command (like "sh") as "just exec this", and anything else as a bare
+    # liquibase subcommand run with the env vars above. Overriding
+    # entrypoint to `sh -c` unconditionally (as this used to do) broke every
+    # ad-hoc `docker compose run --rm liquibase <command>` invocation — the
+    # command ran as a literal shell command instead of ever reaching
+    # liquibase (e.g. `status --verbose` failed with "status: not found").
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        # `db` reporting "healthy" doesn't guarantee it's still up by the
+        # time we connect (e.g. mysqld's internal restart during
+        # first-time init can briefly close the port right after the
+        # healthcheck passes), so retry a few times instead of failing the
+        # whole `docker compose up` on one transient "connection refused".
+        for i in $(seq 1 15); do
+          if liquibase update; then
+            exit 0
+          fi
+          echo "liquibase: db not reachable yet, retrying in 3s ($$i/15)..."
+          sleep 3
+        done
+        exit 1
 
   backend:
     build: ./backend
@@ -23,17 +74,31 @@ services:
     restart: always
     env_file:
       - ./backend/.env
+    # Overrides the image's baked-in `ENV NODE_ENV=production` (see
+    # backend/Dockerfile) only when the caller sets NODE_ENV — used by
+    # scripts/run-e2e.sh to get NODE_ENV=test, which the app's rate
+    # limiters already treat as "skip" (see auth.ts's isTestEnv()) since
+    # an E2E run fires far more requests per minute than a real user
+    # would. Unset (the normal dev/prod case), this resolves to the same
+    # "production" default the image already has — no behavior change.
+    environment:
+      NODE_ENV: ${NODE_ENV:-production}
     depends_on:
-      - db
+      liquibase:
+        condition: service_completed_successfully
     ports:
       - "4000:4000"
 
   frontend:
-    build: ./frontend
+    build:
+      context: ./frontend
+      args:
+        VITE_API_URL: ${VITE_API_URL:-http://localhost:4000/api}
     container_name: ilm_frontend
     restart: always
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
     ports:
       - "5173:80"
 
