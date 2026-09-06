@@ -1,8 +1,9 @@
 # ilm-frontend
 
-React/TypeScript SPA for ilm-school-portal — one role-based dashboard per
+React/TypeScript SPA for Ilm Tracker — one role-based dashboard per
 user type (system admin, owner, maintainer, admin, teacher, parent,
-student), talking to the backend REST API.
+student), talking to the backend REST API. Deployed as a static build to
+Cloudflare Pages.
 
 ## Stack
 
@@ -10,19 +11,20 @@ student), talking to the backend REST API.
 - React Router (single `/dashboard` route, content switched by role)
 - Axios, with an httpOnly session cookie for auth (no token handling in JS)
 - Vitest + Testing Library for tests
-- Served in production via nginx (see `Dockerfile` / `nginx.conf`)
+- Deployed to Cloudflare Pages — `public/_headers` (security headers) and
+  `public/_redirects` (SPA fallback to `index.html`) replace the old
+  nginx config
 
 ## Getting started
 
-Normally this runs via `docker compose up` from the repo root, alongside
-the backend and MySQL — see the root README. To run it standalone against
-an already-running backend:
+Run against an already-running backend (`wrangler dev`, see
+`backend/README.md`, or the root README for the full local setup):
 
 ```
 cd frontend
 npm install
-cp .env.example .env   # set VITE_API_URL if the backend isn't on localhost:4000
-npm run dev             # Vite dev server, http://localhost:5173
+cp .env.example .env.local   # set VITE_API_URL if the backend isn't on localhost:8787
+npm run dev                   # Vite dev server, http://localhost:5173
 ```
 
 Other scripts:
@@ -32,13 +34,19 @@ Other scripts:
 - `npm test` — run the Vitest suite
 - `npm run lint` / `npm run lint:fix` — ESLint
 
+Deploying: `npx wrangler pages deploy dist --project-name=<your-pages-project>`
+(see `DEPLOY_RUNBOOK.md`) — or, if Pages is connected to the repo via
+Cloudflare's git integration, a push to the deploy branch does this
+automatically.
+
 ## Environment variables
 
 - `VITE_API_URL` — base URL of the backend API, e.g.
-  `http://localhost:4000/api`. Defaults to that value if unset. Vite bakes
-  `VITE_*` vars into the JS bundle **at build time** — in Docker this
-  arrives as a build `ARG`, so the image must be rebuilt (not just
-  restarted) whenever it changes.
+  `http://localhost:8787/api` locally (wrangler dev's default port) or the
+  deployed Worker's URL in production. Defaults to
+  `http://localhost:8787/api` if unset. Vite bakes `VITE_*` vars into the
+  JS bundle **at build time** — changing it means a rebuild+redeploy, not
+  just a config change (there's no running container to restart).
 
 ## Project layout
 
@@ -52,7 +60,7 @@ src/
                             "auth:unauthorized" event AuthContext listens for
   pages/
     Home.tsx, Login.tsx, Register.tsx, PendingApproval.tsx,
-    PrivacyPolicy.tsx, NoDashboard.tsx
+    ForcePasswordReset.tsx, PrivacyPolicy.tsx, NoDashboard.tsx
     dashboards/            one component per role — SystemAdminDashboard,
                             OwnerDashboard, MaintainerDashboard, AdminDashboard,
                             TeacherDashboard, ParentDashboard, StudentDashboard
@@ -77,7 +85,9 @@ listens for the `auth:unauthorized` event dispatched by `api.ts`'s
 response interceptor to clear state and redirect to `/login` when a
 session expires or is revoked server-side. `InactivityWatcher` +
 `useInactivityLogout` additionally log the user out client-side after a
-period of no activity, independent of token expiry.
+period of no activity, independent of token expiry. A `mustResetPassword`
+flag on the user redirects to `/force-password-reset` instead of the
+normal dashboard until that flow is completed.
 
 ## Routing model
 

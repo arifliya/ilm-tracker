@@ -46,15 +46,18 @@ describe("OwnerDashboard (smoke)", () => {
       if (url === "/features") return Promise.resolve({ data: { flags: { password_management: true } } });
       if (url === "/admin/students-parents") {
         return Promise.resolve({
-          data: [
-            {
-              student_id: 701,
-              student_user_id: 900,
-              student_first_name: "Amy",
-              student_last_name: "Doe",
-              guardians: []
-            }
-          ]
+          data: {
+            studentsParents: [
+              {
+                student_id: 701,
+                student_user_id: 900,
+                student_first_name: "Amy",
+                student_last_name: "Doe",
+                guardians: []
+              }
+            ],
+            total: 1
+          }
         });
       }
       return Promise.resolve({ data: [] });

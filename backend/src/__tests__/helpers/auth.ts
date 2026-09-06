@@ -1,8 +1,10 @@
-import jwt from "jsonwebtoken";
-import { env } from "../../config/env";
-import { RoleName } from "../../types/auth";
+import { sign } from "hono/jwt";
+import type { RoleName } from "../../types/auth";
+import { TEST_JWT_SECRET } from "./testEnv";
 
-export const authCookie = (payload: {
+// hono/jwt's sign() is async (WebCrypto-based), unlike jsonwebtoken's sync
+// sign — so unlike the old helper, every call site needs `await`.
+export const authCookie = async (payload: {
   userId: number;
   username?: string;
   role: RoleName;
@@ -11,18 +13,20 @@ export const authCookie = (payload: {
   sessionStartedAt?: number;
   mustResetPassword?: boolean;
 }) => {
-  const token = jwt.sign(
+  const now = Math.floor(Date.now() / 1000);
+  const token = await sign(
     {
       userId: payload.userId,
       username: payload.username ?? "testuser",
       role: payload.role,
       schoolId: payload.schoolId,
       tokenVersion: payload.tokenVersion ?? 0,
-      sessionStartedAt: payload.sessionStartedAt ?? Math.floor(Date.now() / 1000),
-      mustResetPassword: payload.mustResetPassword ?? false
+      sessionStartedAt: payload.sessionStartedAt ?? now,
+      mustResetPassword: payload.mustResetPassword ?? false,
+      iat: now,
+      exp: now + 3600
     },
-    env.JWT_SECRET,
-    { expiresIn: "1h" }
+    TEST_JWT_SECRET
   );
   return `token=${token}`;
 };

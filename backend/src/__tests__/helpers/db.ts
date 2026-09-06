@@ -1,10 +1,11 @@
+// Mostly superseded by config/__mocks__/db.ts's `mockDb` now that
+// transactions run directly on c.get("db") instead of a separate
+// pool.getConnection() connection — kept in case a route test still needs
+// a standalone mock connection object for some other reason.
 export const mockConnection = () => ({
-  beginTransaction: jest.fn().mockResolvedValue(undefined),
   query: jest.fn(),
-  commit: jest.fn().mockResolvedValue(undefined),
-  rollback: jest.fn().mockResolvedValue(undefined),
   release: jest.fn()
 });
 
-/** Wraps rows the way mysql2's `pool.query` resolves: `[rows, fields]`. */
-export const rows = (data: unknown) => [data, []] as const;
+/** Wraps rows the way pg/@neondatabase/serverless resolves a query: `{rows, rowCount}`. */
+export const rows = (data: unknown[]) => ({ rows: data, rowCount: data.length });

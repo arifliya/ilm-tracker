@@ -3,14 +3,13 @@ jest.mock("../../utils/featureFlags", () => ({
   resetExpiredFeatureFlags: jest.fn().mockResolvedValue(undefined)
 }));
 
-import request from "supertest";
-import { app } from "../../app";
-import { pool } from "../../config/db";
+import app from "../../app";
 import { rows } from "../helpers/db";
+import { request } from "../helpers/request";
 import { authCookie } from "../helpers/auth";
 
-const mockQuery = pool.query as jest.Mock;
-const teacherCookie = authCookie({ userId: 1, role: "teacher", schoolId: 10 });
+const { mockDb } = jest.requireMock<typeof import("../../config/__mocks__/db")>("../../config/db");
+const mockQuery = mockDb.query as jest.Mock;
 
 describe("GET /api/features", () => {
   it("401s without a cookie", async () => {
@@ -26,6 +25,7 @@ describe("GET /api/features", () => {
       ])
     );
 
+    const teacherCookie = await authCookie({ userId: 1, role: "teacher", schoolId: 10 });
     const res = await request(app).get("/api/features").set("Cookie", teacherCookie);
 
     expect(res.status).toBe(200);
@@ -34,6 +34,7 @@ describe("GET /api/features", () => {
 
   it("500s when the query throws", async () => {
     mockQuery.mockRejectedValueOnce(new Error("db down"));
+    const teacherCookie = await authCookie({ userId: 1, role: "teacher", schoolId: 10 });
     const res = await request(app).get("/api/features").set("Cookie", teacherCookie);
     expect(res.status).toBe(500);
   });

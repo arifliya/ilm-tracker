@@ -1,49 +1,74 @@
-import { NextFunction, Response, Router } from "express";
-import { pool } from "../config/db";
+import { Hono } from "hono";
+import type { Context, Next } from "hono";
+import type { AppEnv } from "../types/env";
+import type { DbConnection } from "../config/db";
 import { authMiddleware, requireRole } from "../middleware/auth";
-import { AuthenticatedRequest } from "../types/auth";
 import { isFeatureEnabled } from "../utils/featureFlags";
-import { asyncHandler } from "../utils/asyncHandler";
 import { HttpError } from "../utils/httpError";
 import { createPayment, verifyWebhookSignature } from "../utils/directDebitProvider";
 import { logger } from "../utils/logger";
+import { requireEnv } from "../config/env";
 
-const router = Router();
+const router = new Hono<AppEnv>();
 
 // Deliberately narrower than the STAFF_MGMT-style groups elsewhere: fee
 // tracking is admin + the dedicated treasurer role only — owner does not
 // get it here, per the product decision behind this feature.
 const FEES_MGMT = requireRole("admin", "treasurer");
 
-const requireFeesEnabled = async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
-  if (!(await isFeatureEnabled("fees", req.user!.schoolId))) {
-    return res.status(403).json({ message: "Fee tracking is currently disabled for this school" });
+const requireFeesEnabled = async (c: Context<AppEnv>, next: Next) => {
+  if (!(await isFeatureEnabled(c.get("db"), "fees", c.get("user")!.schoolId))) {
+    return c.json({ message: "Fee tracking is currently disabled for this school" }, 403);
   }
-  next();
+  await next();
 };
 
 const isNonEmpty = (v: unknown) => typeof v === "string" && v.trim().length > 0;
 
 const isValidAmount = (v: unknown) => typeof v === "number" && Number.isFinite(v) && v >= 0;
 
-const loadFeePeriod = async (feePeriodId: number, schoolId: number | null) => {
-  const [rows] = await pool.query(
-    "SELECT id, school_id, name FROM fee_periods WHERE id = ? AND school_id = ?",
+interface IdRow {
+  id: number;
+}
+
+interface FeePeriodRow {
+  id: number;
+  school_id: number;
+  name: string;
+}
+
+// Postgres returns DECIMAL/NUMERIC columns as strings (to avoid float
+// precision loss), not numbers — amount is typed to match, same reasoning
+// as the COUNT(*)-as-string convention used elsewhere.
+interface FeeRow {
+  id: number;
+  student_id: number;
+  fee_period_id: number;
+  amount: string;
+  status: string;
+  payment_method: string;
+  provider_payment_id: string | null;
+  failure_reason: string | null;
+}
+
+const loadFeePeriod = async (db: DbConnection, feePeriodId: number, schoolId: number | null): Promise<FeePeriodRow | null> => {
+  const { rows } = await db.query<FeePeriodRow>(
+    "SELECT id, school_id, name FROM fee_periods WHERE id = $1 AND school_id = $2",
     [feePeriodId, schoolId]
   );
-  return (rows as any[])[0] || null;
+  return rows[0] || null;
 };
 
-const loadFee = async (feeId: number, schoolId: number | null) => {
-  const [rows] = await pool.query(
+const loadFee = async (db: DbConnection, feeId: number, schoolId: number | null): Promise<FeeRow | null> => {
+  const { rows } = await db.query<FeeRow>(
     `SELECT sf.id, sf.student_id, sf.fee_period_id, sf.amount, sf.status,
             sf.payment_method, sf.provider_payment_id, sf.failure_reason
      FROM student_fees sf
      JOIN fee_periods fp ON fp.id = sf.fee_period_id
-     WHERE sf.id = ? AND fp.school_id = ?`,
+     WHERE sf.id = $1 AND fp.school_id = $2`,
     [feeId, schoolId]
   );
-  return (rows as any[])[0] || null;
+  return rows[0] || null;
 };
 
 // Picks the mandate to collect against when a student has more than one
@@ -52,17 +77,21 @@ const loadFee = async (feeId: number, schoolId: number | null) => {
 // this feature is built from only ever describes "the student's parent"
 // singular, and multi-guardian collection ownership isn't something this
 // pass tries to solve.
-const findActiveMandateForStudent = async (studentId: number) => {
-  const [rows] = await pool.query(
+interface MandateRow {
+  provider_mandate_id: string;
+}
+
+const findActiveMandateForStudent = async (db: DbConnection, studentId: number): Promise<MandateRow | null> => {
+  const { rows } = await db.query<MandateRow>(
     `SELECT pm.provider_mandate_id
      FROM payment_mandates pm
      JOIN student_guardians sg ON sg.parent_id = pm.parent_id AND sg.status = 'approved'
-     WHERE sg.student_id = ? AND pm.status = 'active'
+     WHERE sg.student_id = $1 AND pm.status = 'active'
      ORDER BY pm.parent_id ASC
      LIMIT 1`,
     [studentId]
   );
-  return (rows as any[])[0] || null;
+  return rows[0] || null;
 };
 
 // Submits one freshly-generated, still-unpaid fee for direct-debit
@@ -70,16 +99,19 @@ const findActiveMandateForStudent = async (studentId: number) => {
 // mandate. Never throws — a provider failure here just leaves the fee as
 // manual/unpaid, same as if direct debit was never involved, so one bad
 // submission can't fail the whole bulk-generate call.
-const submitFeeForCollection = async (fee: { id: number; student_id: number; amount: number }): Promise<boolean> => {
-  const mandate = await findActiveMandateForStudent(fee.student_id);
+const submitFeeForCollection = async (
+  db: DbConnection,
+  fee: { id: number; student_id: number; amount: string }
+): Promise<boolean> => {
+  const mandate = await findActiveMandateForStudent(db, fee.student_id);
   if (!mandate) return false;
 
   try {
     const payment = await createPayment(mandate.provider_mandate_id, Number(fee.amount), fee.id);
-    await pool.query(
+    await db.query(
       `UPDATE student_fees
-       SET status = 'pending_collection', payment_method = 'direct_debit', provider_payment_id = ?
-       WHERE id = ? AND status = 'unpaid'`,
+       SET status = 'pending_collection', payment_method = 'direct_debit', provider_payment_id = $1
+       WHERE id = $2 AND status = 'unpaid'`,
       [payment.providerPaymentId, fee.id]
     );
     return true;
@@ -95,6 +127,7 @@ const submitFeeForCollection = async (fee: { id: number; student_id: number; amo
 // duplicate/replayed event for an already-settled fee is a silent no-op,
 // since providers retry webhook delivery.
 const applyProviderOutcome = async (
+  db: DbConnection,
   fee: { id: number; status: string },
   outcome: "paid" | "failed",
   failureReason?: string
@@ -102,72 +135,76 @@ const applyProviderOutcome = async (
   if (fee.status !== "pending_collection") return;
 
   if (outcome === "paid") {
-    await pool.query(
-      "UPDATE student_fees SET status = 'paid', paid_at = CURRENT_TIMESTAMP, failure_reason = NULL WHERE id = ?",
+    await db.query(
+      "UPDATE student_fees SET status = 'paid', paid_at = CURRENT_TIMESTAMP, failure_reason = NULL WHERE id = $1",
       [fee.id]
     );
   } else {
-    await pool.query(
-      "UPDATE student_fees SET status = 'failed', failure_reason = ? WHERE id = ?",
-      [failureReason && String(failureReason).trim() ? String(failureReason).trim() : "Payment failed", fee.id]
-    );
+    await db.query("UPDATE student_fees SET status = 'failed', failure_reason = $1 WHERE id = $2", [
+      failureReason && String(failureReason).trim() ? String(failureReason).trim() : "Payment failed",
+      fee.id
+    ]);
   }
 };
 
 /* ============================================================
    LIST FEE PERIODS FOR THE CALLER'S SCHOOL
    ============================================================ */
-router.get(
-  "/fee-periods",
-  authMiddleware,
-  FEES_MGMT,
-  requireFeesEnabled,
-  asyncHandler(async (req: AuthenticatedRequest, res) => {
-    const [rows] = await pool.query(
-      "SELECT id, name, start_date, end_date FROM fee_periods WHERE school_id = ? ORDER BY start_date DESC",
-      [req.user!.schoolId]
+interface FeePeriodListRow {
+  id: number;
+  name: string;
+  start_date: Date;
+  end_date: Date;
+}
+
+router.get("/fee-periods", authMiddleware, FEES_MGMT, requireFeesEnabled, async c => {
+  const { rows } = await c
+    .get("db")
+    .query<FeePeriodListRow>(
+      "SELECT id, name, start_date, end_date FROM fee_periods WHERE school_id = $1 ORDER BY start_date DESC",
+      [c.get("user")!.schoolId]
     );
-    res.json({ feePeriods: rows });
-  })
-);
+  return c.json({ feePeriods: rows });
+});
 
 /* ============================================================
    CREATE A FEE PERIOD
    ============================================================ */
-router.post(
-  "/fee-periods",
-  authMiddleware,
-  FEES_MGMT,
-  requireFeesEnabled,
-  asyncHandler(async (req: AuthenticatedRequest, res) => {
-    const { name, start_date, end_date } = req.body;
-    if (!isNonEmpty(name)) return res.status(400).json({ message: "Period name is required" });
-    if (!isNonEmpty(start_date) || !isNonEmpty(end_date)) {
-      return res.status(400).json({ message: "Start date and end date are required" });
-    }
-    if (String(end_date) < String(start_date)) {
-      return res.status(400).json({ message: "End date must be on or after the start date" });
-    }
+router.post("/fee-periods", authMiddleware, FEES_MGMT, requireFeesEnabled, async c => {
+  const db = c.get("db");
+  const user = c.get("user")!;
+  const { name, start_date, end_date } = await c.req.json();
+  if (!isNonEmpty(name)) return c.json({ message: "Period name is required" }, 400);
+  if (!isNonEmpty(start_date) || !isNonEmpty(end_date)) {
+    return c.json({ message: "Start date and end date are required" }, 400);
+  }
+  if (String(end_date) < String(start_date)) {
+    return c.json({ message: "End date must be on or after the start date" }, 400);
+  }
 
-    let result;
-    try {
-      [result] = await pool.query(
-        "INSERT INTO fee_periods (school_id, name, start_date, end_date) VALUES (?, ?, ?, ?)",
-        [req.user!.schoolId, String(name).trim(), start_date, end_date]
-      );
-    } catch (err: any) {
-      if (err?.code === "ER_DUP_ENTRY") {
-        throw new HttpError(409, "A fee period with this name already exists");
-      }
-      throw err;
+  let row: IdRow;
+  try {
+    ({
+      rows: [row]
+    } = await db.query<IdRow>(
+      "INSERT INTO fee_periods (school_id, name, start_date, end_date) VALUES ($1, $2, $3, $4) RETURNING id",
+      [user.schoolId, String(name).trim(), start_date, end_date]
+    ));
+  } catch (err: any) {
+    if (err?.code === "23505") {
+      throw new HttpError(409, "A fee period with this name already exists");
     }
+    throw err;
+  }
 
-    res.status(201).json({
+  return c.json(
+    {
       message: "Fee period created",
-      feePeriod: { id: (result as any).insertId, name: String(name).trim(), start_date, end_date }
-    });
-  })
-);
+      feePeriod: { id: row.id, name: String(name).trim(), start_date, end_date }
+    },
+    201
+  );
+});
 
 /* ============================================================
    LIST CLASSES — FOR BUILDING THE PER-CLASS GENERATE FORM
@@ -175,19 +212,19 @@ router.post(
    /admin/classes: that one is gated by STAFF_MGMT (admin/owner/
    system_admin), which doesn't include treasurer.
    ============================================================ */
-router.get(
-  "/classes",
-  authMiddleware,
-  FEES_MGMT,
-  requireFeesEnabled,
-  asyncHandler(async (req: AuthenticatedRequest, res) => {
-    const [rows] = await pool.query(
-      "SELECT id, class_name FROM classes WHERE school_id = ? ORDER BY class_name ASC",
-      [req.user!.schoolId]
-    );
-    res.json({ classes: rows });
-  })
-);
+interface ClassRow {
+  id: number;
+  class_name: string;
+}
+
+router.get("/classes", authMiddleware, FEES_MGMT, requireFeesEnabled, async c => {
+  const { rows } = await c
+    .get("db")
+    .query<ClassRow>("SELECT id, class_name FROM classes WHERE school_id = $1 ORDER BY class_name ASC", [
+      c.get("user")!.schoolId
+    ]);
+  return c.json({ classes: rows });
+});
 
 /* ============================================================
    LIST EVERY STUDENT'S FEE ROW FOR A PERIOD
@@ -197,41 +234,50 @@ router.get(
    one class — a plain join would return one row per class membership for
    the same fee, duplicating the student in the table.
    ============================================================ */
-router.get(
-  "/fee-periods/:id/fees",
-  authMiddleware,
-  FEES_MGMT,
-  requireFeesEnabled,
-  asyncHandler(async (req: AuthenticatedRequest, res) => {
-    const feePeriodId = Number(req.params.id);
-    const period = await loadFeePeriod(feePeriodId, req.user!.schoolId);
-    if (!period) return res.status(404).json({ message: "Fee period not found" });
+interface StudentFeeListRow {
+  student_id: number;
+  student_first_name: string | null;
+  student_surname: string | null;
+  class_name: string | null;
+  fee_id: number | null;
+  amount: string | null;
+  status: string | null;
+  payment_method: string | null;
+  failure_reason: string | null;
+  paid_at: Date | null;
+}
 
-    const [rows] = await pool.query(
-      `SELECT
-         s.id AS student_id,
-         s.first_name AS student_first_name,
-         s.surname AS student_surname,
-         GROUP_CONCAT(c.class_name ORDER BY c.class_name SEPARATOR ', ') AS class_name,
-         sf.id AS fee_id,
-         sf.amount AS amount,
-         sf.status AS status,
-         sf.payment_method AS payment_method,
-         sf.failure_reason AS failure_reason,
-         sf.paid_at AS paid_at
-       FROM students s
-       LEFT JOIN student_classes sc ON sc.student_id = s.id
-       LEFT JOIN classes c ON c.id = sc.class_id
-       LEFT JOIN student_fees sf ON sf.student_id = s.id AND sf.fee_period_id = ?
-       WHERE s.school_id = ?
-       GROUP BY s.id, sf.id
-       ORDER BY s.surname ASC, s.first_name ASC`,
-      [feePeriodId, req.user!.schoolId]
-    );
+router.get("/fee-periods/:id/fees", authMiddleware, FEES_MGMT, requireFeesEnabled, async c => {
+  const db = c.get("db");
+  const user = c.get("user")!;
+  const feePeriodId = Number(c.req.param("id"));
+  const period = await loadFeePeriod(db, feePeriodId, user.schoolId);
+  if (!period) return c.json({ message: "Fee period not found" }, 404);
 
-    res.json({ feePeriod: period, fees: rows });
-  })
-);
+  const { rows } = await db.query<StudentFeeListRow>(
+    `SELECT
+       s.id AS student_id,
+       s.first_name AS student_first_name,
+       s.surname AS student_surname,
+       string_agg(c.class_name, ', ' ORDER BY c.class_name) AS class_name,
+       sf.id AS fee_id,
+       sf.amount AS amount,
+       sf.status AS status,
+       sf.payment_method AS payment_method,
+       sf.failure_reason AS failure_reason,
+       sf.paid_at AS paid_at
+     FROM students s
+     LEFT JOIN student_classes sc ON sc.student_id = s.id
+     LEFT JOIN classes c ON c.id = sc.class_id
+     LEFT JOIN student_fees sf ON sf.student_id = s.id AND sf.fee_period_id = $1
+     WHERE s.school_id = $2
+     GROUP BY s.id, sf.id
+     ORDER BY s.surname ASC, s.first_name ASC`,
+    [feePeriodId, user.schoolId]
+  );
+
+  return c.json({ feePeriod: period, fees: rows });
+});
 
 /* ============================================================
    BULK-GENERATE FEES FOR A PERIOD — PER-CLASS AMOUNTS
@@ -253,152 +299,160 @@ router.get(
    fires at generation time — a mandate that becomes active later doesn't
    retroactively sweep up fees generated before it existed.
    ============================================================ */
-router.post(
-  "/fee-periods/:id/generate",
-  authMiddleware,
-  FEES_MGMT,
-  requireFeesEnabled,
-  asyncHandler(async (req: AuthenticatedRequest, res) => {
-    const feePeriodId = Number(req.params.id);
-    const { amounts } = req.body;
+interface ClassMembershipRow {
+  student_id: number;
+  class_id: number;
+}
 
-    const period = await loadFeePeriod(feePeriodId, req.user!.schoolId);
-    if (!period) return res.status(404).json({ message: "Fee period not found" });
+interface StudentIdRow {
+  student_id: number;
+}
 
-    if (!Array.isArray(amounts) || amounts.length === 0) {
-      return res.status(400).json({ message: "At least one class amount is required" });
+interface GeneratedFeeRow {
+  id: number;
+  student_id: number;
+  amount: string;
+}
+
+router.post("/fee-periods/:id/generate", authMiddleware, FEES_MGMT, requireFeesEnabled, async c => {
+  const db = c.get("db");
+  const user = c.get("user")!;
+  const feePeriodId = Number(c.req.param("id"));
+  const { amounts } = await c.req.json();
+
+  const period = await loadFeePeriod(db, feePeriodId, user.schoolId);
+  if (!period) return c.json({ message: "Fee period not found" }, 404);
+
+  if (!Array.isArray(amounts) || amounts.length === 0) {
+    return c.json({ message: "At least one class amount is required" }, 400);
+  }
+  for (const entry of amounts) {
+    if (!Number.isInteger(entry?.class_id) || !isValidAmount(entry?.amount)) {
+      return c.json({ message: "Each entry must have a valid class_id and a valid, non-negative amount" }, 400);
     }
-    for (const entry of amounts) {
-      if (!Number.isInteger(entry?.class_id) || !isValidAmount(entry?.amount)) {
-        return res.status(400).json({ message: "Each entry must have a valid class_id and a valid, non-negative amount" });
-      }
-    }
+  }
 
-    // Only trust amounts for classes that actually belong to this school —
-    // otherwise a caller could smuggle in a class_id from another school
-    // even though every other lookup in this file is scoped that way.
-    const requestedClassIds = amounts.map(a => a.class_id);
-    const [classRows] = await pool.query(
-      "SELECT id FROM classes WHERE school_id = ? AND id IN (?)",
-      [req.user!.schoolId, requestedClassIds]
-    );
-    const validClassIds = new Set((classRows as any[]).map(r => r.id));
+  // Only trust amounts for classes that actually belong to this school —
+  // otherwise a caller could smuggle in a class_id from another school
+  // even though every other lookup in this file is scoped that way.
+  const requestedClassIds = amounts.map((a: any) => a.class_id);
+  const { rows: classRows } = await db.query<IdRow>("SELECT id FROM classes WHERE school_id = $1 AND id = ANY($2)", [
+    user.schoolId,
+    requestedClassIds
+  ]);
+  const validClassIds = new Set(classRows.map(r => r.id));
 
-    const amountByClass = new Map<number, number>();
-    for (const entry of amounts) {
-      if (validClassIds.has(entry.class_id)) amountByClass.set(entry.class_id, entry.amount);
-    }
-    if (amountByClass.size === 0) {
-      return res.status(400).json({ message: "No valid classes were provided" });
-    }
+  const amountByClass = new Map<number, number>();
+  for (const entry of amounts) {
+    if (validClassIds.has(entry.class_id)) amountByClass.set(entry.class_id, entry.amount);
+  }
+  if (amountByClass.size === 0) {
+    return c.json({ message: "No valid classes were provided" }, 400);
+  }
 
-    const [membershipRows] = await pool.query(
-      `SELECT sc.student_id, sc.class_id
-       FROM student_classes sc
-       JOIN students s ON s.id = sc.student_id
-       WHERE s.school_id = ? AND sc.class_id IN (?)`,
-      [req.user!.schoolId, Array.from(amountByClass.keys())]
-    );
+  const { rows: membershipRows } = await db.query<ClassMembershipRow>(
+    `SELECT sc.student_id, sc.class_id
+     FROM student_classes sc
+     JOIN students s ON s.id = sc.student_id
+     WHERE s.school_id = $1 AND sc.class_id = ANY($2)`,
+    [user.schoolId, Array.from(amountByClass.keys())]
+  );
 
-    const totalByStudent = new Map<number, number>();
-    for (const row of membershipRows as any[]) {
-      const classAmount = amountByClass.get(row.class_id) ?? 0;
-      totalByStudent.set(row.student_id, (totalByStudent.get(row.student_id) || 0) + classAmount);
-    }
+  const totalByStudent = new Map<number, number>();
+  for (const row of membershipRows) {
+    const classAmount = amountByClass.get(row.class_id) ?? 0;
+    totalByStudent.set(row.student_id, (totalByStudent.get(row.student_id) || 0) + classAmount);
+  }
 
-    if (totalByStudent.size === 0) {
-      return res.json({ message: "No students found in the given classes", affectedRows: 0, submittedForCollection: 0 });
-    }
+  if (totalByStudent.size === 0) {
+    return c.json({ message: "No students found in the given classes", affectedRows: 0, submittedForCollection: 0 });
+  }
 
-    const [existingRows] = await pool.query(
-      "SELECT student_id FROM student_fees WHERE fee_period_id = ?",
+  const { rows: existingRows } = await db.query<StudentIdRow>(
+    "SELECT student_id FROM student_fees WHERE fee_period_id = $1",
+    [feePeriodId]
+  );
+  const preExistingStudentIds = new Set(existingRows.map(r => r.student_id));
+
+  const placeholders: string[] = [];
+  const values: any[] = [];
+  let paramIndex = 1;
+  for (const [studentId, total] of totalByStudent) {
+    placeholders.push(`($${paramIndex}, $${paramIndex + 1}, $${paramIndex + 2})`);
+    values.push(studentId, feePeriodId, total);
+    paramIndex += 3;
+  }
+
+  const { rowCount } = await db.query(
+    `INSERT INTO student_fees (student_id, fee_period_id, amount)
+     VALUES ${placeholders.join(", ")}
+     ON CONFLICT (student_id, fee_period_id) DO NOTHING`,
+    values
+  );
+
+  let submittedForCollection = 0;
+  if (await isFeatureEnabled(db, "direct_debit", user.schoolId)) {
+    const { rows: newRows } = await db.query<GeneratedFeeRow>(
+      "SELECT id, student_id, amount FROM student_fees WHERE fee_period_id = $1 AND status = 'unpaid'",
       [feePeriodId]
     );
-    const preExistingStudentIds = new Set((existingRows as any[]).map(r => r.student_id));
-
-    const placeholders: string[] = [];
-    const values: any[] = [];
-    for (const [studentId, total] of totalByStudent) {
-      placeholders.push("(?, ?, ?)");
-      values.push(studentId, feePeriodId, total);
+    for (const row of newRows) {
+      if (preExistingStudentIds.has(row.student_id)) continue;
+      if (await submitFeeForCollection(db, row)) submittedForCollection += 1;
     }
+  }
 
-    const [result] = await pool.query(
-      `INSERT INTO student_fees (student_id, fee_period_id, amount)
-       VALUES ${placeholders.join(", ")}
-       ON DUPLICATE KEY UPDATE amount = amount`,
-      values
-    );
-
-    let submittedForCollection = 0;
-    if (await isFeatureEnabled("direct_debit", req.user!.schoolId)) {
-      const [newRows] = await pool.query(
-        "SELECT id, student_id, amount FROM student_fees WHERE fee_period_id = ? AND status = 'unpaid'",
-        [feePeriodId]
-      );
-      for (const row of newRows as any[]) {
-        if (preExistingStudentIds.has(row.student_id)) continue;
-        if (await submitFeeForCollection(row)) submittedForCollection += 1;
-      }
-    }
-
-    res.json({
-      message: "Fees generated",
-      affectedRows: (result as any).affectedRows,
-      submittedForCollection
-    });
-  })
-);
+  return c.json({
+    message: "Fees generated",
+    affectedRows: rowCount,
+    submittedForCollection
+  });
+});
 
 /* ============================================================
    EDIT A STUDENT'S FEE AMOUNT — ONLY WHILE UNPAID
    ============================================================ */
-router.put(
-  "/fees/:feeId",
-  authMiddleware,
-  FEES_MGMT,
-  requireFeesEnabled,
-  asyncHandler(async (req: AuthenticatedRequest, res) => {
-    const feeId = Number(req.params.feeId);
-    const { amount } = req.body;
+router.put("/fees/:feeId", authMiddleware, FEES_MGMT, requireFeesEnabled, async c => {
+  const db = c.get("db");
+  const user = c.get("user")!;
+  const feeId = Number(c.req.param("feeId"));
+  const { amount } = await c.req.json();
 
-    const fee = await loadFee(feeId, req.user!.schoolId);
-    if (!fee) return res.status(404).json({ message: "Fee record not found" });
+  const fee = await loadFee(db, feeId, user.schoolId);
+  if (!fee) return c.json({ message: "Fee record not found" }, 404);
 
-    if (fee.status === "paid") {
-      return res.status(400).json({ message: "This fee is already marked as paid — mark it unpaid before editing the amount" });
-    }
-    if (fee.status === "pending_collection") {
-      return res.status(400).json({ message: "This fee has already been submitted for direct-debit collection at its current amount" });
-    }
+  if (fee.status === "paid") {
+    return c.json({ message: "This fee is already marked as paid — mark it unpaid before editing the amount" }, 400);
+  }
+  if (fee.status === "pending_collection") {
+    return c.json(
+      { message: "This fee has already been submitted for direct-debit collection at its current amount" },
+      400
+    );
+  }
 
-    if (!isValidAmount(amount)) return res.status(400).json({ message: "A valid, non-negative amount is required" });
+  if (!isValidAmount(amount)) return c.json({ message: "A valid, non-negative amount is required" }, 400);
 
-    await pool.query("UPDATE student_fees SET amount = ? WHERE id = ?", [amount, feeId]);
-    res.json({ message: "Fee amount updated" });
-  })
-);
+  await db.query("UPDATE student_fees SET amount = $1 WHERE id = $2", [amount, feeId]);
+  return c.json({ message: "Fee amount updated" });
+});
 
 /* ============================================================
    MARK A FEE AS PAID
    ============================================================ */
-router.post(
-  "/fees/:feeId/mark-paid",
-  authMiddleware,
-  FEES_MGMT,
-  requireFeesEnabled,
-  asyncHandler(async (req: AuthenticatedRequest, res) => {
-    const feeId = Number(req.params.feeId);
-    const fee = await loadFee(feeId, req.user!.schoolId);
-    if (!fee) return res.status(404).json({ message: "Fee record not found" });
+router.post("/fees/:feeId/mark-paid", authMiddleware, FEES_MGMT, requireFeesEnabled, async c => {
+  const db = c.get("db");
+  const user = c.get("user")!;
+  const feeId = Number(c.req.param("feeId"));
+  const fee = await loadFee(db, feeId, user.schoolId);
+  if (!fee) return c.json({ message: "Fee record not found" }, 404);
 
-    await pool.query(
-      "UPDATE student_fees SET status = 'paid', paid_at = CURRENT_TIMESTAMP, marked_paid_by_user_id = ? WHERE id = ?",
-      [req.user!.userId, feeId]
-    );
-    res.json({ message: "Marked as paid" });
-  })
-);
+  await db.query(
+    "UPDATE student_fees SET status = 'paid', paid_at = CURRENT_TIMESTAMP, marked_paid_by_user_id = $1 WHERE id = $2",
+    [user.userId, feeId]
+  );
+  return c.json({ message: "Marked as paid" });
+});
 
 /* ============================================================
    MARK A FEE AS UNPAID (undo a mistake)
@@ -408,26 +462,22 @@ router.post(
    provider state around. It won't be auto-resubmitted; that only happens
    at generation time (see /fee-periods/:id/generate above).
    ============================================================ */
-router.post(
-  "/fees/:feeId/mark-unpaid",
-  authMiddleware,
-  FEES_MGMT,
-  requireFeesEnabled,
-  asyncHandler(async (req: AuthenticatedRequest, res) => {
-    const feeId = Number(req.params.feeId);
-    const fee = await loadFee(feeId, req.user!.schoolId);
-    if (!fee) return res.status(404).json({ message: "Fee record not found" });
+router.post("/fees/:feeId/mark-unpaid", authMiddleware, FEES_MGMT, requireFeesEnabled, async c => {
+  const db = c.get("db");
+  const user = c.get("user")!;
+  const feeId = Number(c.req.param("feeId"));
+  const fee = await loadFee(db, feeId, user.schoolId);
+  if (!fee) return c.json({ message: "Fee record not found" }, 404);
 
-    await pool.query(
-      `UPDATE student_fees
-       SET status = 'unpaid', paid_at = NULL, marked_paid_by_user_id = NULL,
-           payment_method = 'manual', provider_payment_id = NULL, failure_reason = NULL
-       WHERE id = ?`,
-      [feeId]
-    );
-    res.json({ message: "Marked as unpaid" });
-  })
-);
+  await db.query(
+    `UPDATE student_fees
+     SET status = 'unpaid', paid_at = NULL, marked_paid_by_user_id = NULL,
+         payment_method = 'manual', provider_payment_id = NULL, failure_reason = NULL
+     WHERE id = $1`,
+    [feeId]
+  );
+  return c.json({ message: "Marked as unpaid" });
+});
 
 /* ============================================================
    SIMULATE A PROVIDER WEBHOOK — STUB PROVIDER TEST HARNESS
@@ -439,29 +489,25 @@ router.post(
    provider; expected to be removed (or repurposed as a manual override
    tool) once a real provider is wired in.
    ============================================================ */
-router.post(
-  "/fees/:feeId/simulate-collection",
-  authMiddleware,
-  FEES_MGMT,
-  requireFeesEnabled,
-  asyncHandler(async (req: AuthenticatedRequest, res) => {
-    const feeId = Number(req.params.feeId);
-    const fee = await loadFee(feeId, req.user!.schoolId);
-    if (!fee) return res.status(404).json({ message: "Fee record not found" });
+router.post("/fees/:feeId/simulate-collection", authMiddleware, FEES_MGMT, requireFeesEnabled, async c => {
+  const db = c.get("db");
+  const user = c.get("user")!;
+  const feeId = Number(c.req.param("feeId"));
+  const fee = await loadFee(db, feeId, user.schoolId);
+  if (!fee) return c.json({ message: "Fee record not found" }, 404);
 
-    if (fee.status !== "pending_collection") {
-      return res.status(400).json({ message: "This fee is not awaiting direct-debit collection" });
-    }
+  if (fee.status !== "pending_collection") {
+    return c.json({ message: "This fee is not awaiting direct-debit collection" }, 400);
+  }
 
-    const { outcome, failure_reason } = req.body;
-    if (outcome !== "paid" && outcome !== "failed") {
-      return res.status(400).json({ message: "outcome must be 'paid' or 'failed'" });
-    }
+  const { outcome, failure_reason } = await c.req.json();
+  if (outcome !== "paid" && outcome !== "failed") {
+    return c.json({ message: "outcome must be 'paid' or 'failed'" }, 400);
+  }
 
-    await applyProviderOutcome(fee, outcome, failure_reason);
-    res.json({ message: `Simulated provider webhook: ${outcome}` });
-  })
-);
+  await applyProviderOutcome(db, fee, outcome, failure_reason);
+  return c.json({ message: `Simulated provider webhook: ${outcome}` });
+});
 
 /* ============================================================
    PROVIDER WEBHOOK — DIRECT DEBIT PAYMENT OUTCOME
@@ -471,32 +517,49 @@ router.post(
    provider payload reaches this app. Not gated behind requireFeesEnabled/
    isFeatureEnabled: a payment already submitted before a flag was
    toggled off must still be able to settle.
+
+   Reads the raw body via c.req.text() (not c.req.json()) because the HMAC
+   is computed over the exact raw payload bytes — Hono has no equivalent
+   of Express's express.json({verify}) hook for stashing raw bytes
+   alongside a parsed body, and doesn't need one: body reads here are
+   lazy/per-call, so only this one route needs the raw-text path.
    ============================================================ */
-router.post(
-  "/webhooks/direct-debit",
-  asyncHandler(async (req: any, res) => {
-    const signature = req.header("X-Signature");
-    if (!verifyWebhookSignature(req.rawBody || "", signature)) {
-      return res.status(401).json({ message: "Invalid signature" });
-    }
+interface WebhookFeeRow {
+  id: number;
+  status: string;
+}
 
-    const { provider_payment_id, event, failure_reason } = req.body || {};
-    if (!isNonEmpty(provider_payment_id) || (event !== "paid" && event !== "failed")) {
-      return res.status(400).json({ message: "Invalid webhook payload" });
-    }
+router.post("/webhooks/direct-debit", async c => {
+  const rawBody = await c.req.text();
+  const signature = c.req.header("X-Signature");
+  const webhookSecret = requireEnv(c, "DIRECT_DEBIT_WEBHOOK_SECRET");
+  if (!verifyWebhookSignature(rawBody, signature, webhookSecret)) {
+    return c.json({ message: "Invalid signature" }, 401);
+  }
 
-    const [rows] = await pool.query(
-      "SELECT id, status FROM student_fees WHERE provider_payment_id = ?",
-      [provider_payment_id]
-    );
-    const fee = (rows as any[])[0];
-    // Unrecognized payment id, or already settled — acknowledge with 200
-    // rather than an error so the provider doesn't retry indefinitely;
-    // applyProviderOutcome is itself a no-op for an already-settled fee.
-    if (fee) await applyProviderOutcome(fee, event, failure_reason);
+  let body: any = {};
+  try {
+    body = rawBody ? JSON.parse(rawBody) : {};
+  } catch {
+    return c.json({ message: "Invalid webhook payload" }, 400);
+  }
 
-    res.status(200).json({ message: "Webhook processed" });
-  })
-);
+  const { provider_payment_id, event, failure_reason } = body;
+  if (!isNonEmpty(provider_payment_id) || (event !== "paid" && event !== "failed")) {
+    return c.json({ message: "Invalid webhook payload" }, 400);
+  }
+
+  const db = c.get("db");
+  const { rows } = await db.query<WebhookFeeRow>("SELECT id, status FROM student_fees WHERE provider_payment_id = $1", [
+    provider_payment_id
+  ]);
+  const fee = rows[0];
+  // Unrecognized payment id, or already settled — acknowledge with 200
+  // rather than an error so the provider doesn't retry indefinitely;
+  // applyProviderOutcome is itself a no-op for an already-settled fee.
+  if (fee) await applyProviderOutcome(db, fee, event, failure_reason);
+
+  return c.json({ message: "Webhook processed" }, 200);
+});
 
 export default router;

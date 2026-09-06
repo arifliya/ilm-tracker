@@ -1,15 +1,20 @@
 jest.mock("../../config/db");
 
-import request from "supertest";
-import { app } from "../../app";
-import { pool } from "../../config/db";
+import app from "../../app";
 import { rows } from "../helpers/db";
 import { authCookie } from "../helpers/auth";
+import { request } from "../helpers/request";
 
-const mockQuery = pool.query as jest.Mock;
+const { mockDb } = jest.requireMock<typeof import("../../config/__mocks__/db")>("../../config/db");
+const mockQuery = mockDb.query as jest.Mock;
 
-const studentCookie = authCookie({ userId: 1, role: "student", schoolId: 10 });
-const teacherCookie = authCookie({ userId: 2, role: "teacher", schoolId: 10 });
+let studentCookie: string;
+let teacherCookie: string;
+
+beforeAll(async () => {
+  studentCookie = await authCookie({ userId: 1, role: "student", schoolId: 10 });
+  teacherCookie = await authCookie({ userId: 2, role: "teacher", schoolId: 10 });
+});
 
 describe("GET /api/student/classes", () => {
   it("403s for a non-student role", async () => {

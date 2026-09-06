@@ -1,0 +1,17 @@
+# Copy to backend/.dev.vars (git-ignored) for `wrangler dev`. Secrets only
+# — non-secret config (NODE_ENV, COOKIE_SECURE, CORS_ORIGIN) lives in
+# wrangler.toml's [vars] instead.
+#
+# Postgres connection string. For local dev, point it at the Dockerized
+# Postgres from docker-compose.yml using the "db" hostname (the
+# docker-compose service name, not "localhost") — config/db.ts detects
+# this host and routes the connection through the local wsproxy container
+# instead of Neon's own WebSocket proxy (see the comment there):
+# postgres://ilmuser:<password from .env>@db:5432/ilm
+# In any deployed environment, use a real Neon connection string instead
+# (set there via `wrangler secret put DATABASE_URL`, not committed here).
+DATABASE_URL=postgres://ilmuser:CHANGEME@db:5432/ilm
+# openssl rand -hex 32
+JWT_SECRET=changeme-generate-a-random-secret
+# openssl rand -hex 32 — signs/verifies the direct-debit provider webhook
+DIRECT_DEBIT_WEBHOOK_SECRET=changeme-generate-a-random-secret

@@ -3,20 +3,25 @@ jest.mock("../../utils/featureFlags", () => ({
   isFeatureEnabled: jest.fn()
 }));
 
-import request from "supertest";
-import { app } from "../../app";
-import { pool } from "../../config/db";
-import { rows, mockConnection } from "../helpers/db";
+import app from "../../app";
+import { rows } from "../helpers/db";
 import { authCookie } from "../helpers/auth";
+import { request } from "../helpers/request";
 import { isFeatureEnabled } from "../../utils/featureFlags";
 
-const mockQuery = pool.query as jest.Mock;
-const mockGetConnection = pool.getConnection as jest.Mock;
+const { mockDb } = jest.requireMock<typeof import("../../config/__mocks__/db")>("../../config/db");
+const mockQuery = mockDb.query as jest.Mock;
 const mockIsFeatureEnabled = isFeatureEnabled as jest.Mock;
 
-const adminCookie = authCookie({ userId: 1, role: "admin", schoolId: 10 });
-const sysAdminCookie = authCookie({ userId: 2, role: "system_admin", schoolId: null });
-const parentCookie = authCookie({ userId: 3, role: "parent", schoolId: 10 });
+let adminCookie: string;
+let sysAdminCookie: string;
+let parentCookie: string;
+
+beforeAll(async () => {
+  adminCookie = await authCookie({ userId: 1, role: "admin", schoolId: 10 });
+  sysAdminCookie = await authCookie({ userId: 2, role: "system_admin", schoolId: null });
+  parentCookie = await authCookie({ userId: 3, role: "parent", schoolId: 10 });
+});
 
 describe("POST /api/notifications", () => {
   it("403s for a role outside SENDERS", async () => {
@@ -70,13 +75,12 @@ describe("POST /api/notifications", () => {
 
   it("sends to all resolved recipients and reports the count", async () => {
     mockIsFeatureEnabled.mockResolvedValueOnce(true);
-    mockQuery.mockResolvedValueOnce(rows([{ id: 5 }, { id: 6 }])); // recipients
-
-    const conn = mockConnection();
-    mockGetConnection.mockResolvedValueOnce(conn);
-    conn.query
-      .mockResolvedValueOnce([{ insertId: 900 }]) // insert notification
-      .mockResolvedValueOnce([{}]); // insert recipients
+    mockQuery
+      .mockResolvedValueOnce(rows([{ id: 5 }, { id: 6 }])) // recipients
+      .mockResolvedValueOnce(rows([])) // BEGIN
+      .mockResolvedValueOnce(rows([{ id: 900 }])) // insert notification
+      .mockResolvedValueOnce(rows([])) // insert recipients
+      .mockResolvedValueOnce(rows([])); // COMMIT
 
     const res = await request(app)
       .post("/api/notifications")
@@ -85,16 +89,16 @@ describe("POST /api/notifications", () => {
 
     expect(res.status).toBe(201);
     expect(res.body.recipientCount).toBe(2);
-    expect(conn.commit).toHaveBeenCalled();
+    expect(mockQuery).toHaveBeenCalledWith("COMMIT");
   });
 
   it("commits without a recipient insert when there are zero recipients", async () => {
     mockIsFeatureEnabled.mockResolvedValueOnce(true);
-    mockQuery.mockResolvedValueOnce(rows([])); // no recipients
-
-    const conn = mockConnection();
-    mockGetConnection.mockResolvedValueOnce(conn);
-    conn.query.mockResolvedValueOnce([{ insertId: 900 }]);
+    mockQuery
+      .mockResolvedValueOnce(rows([])) // no recipients
+      .mockResolvedValueOnce(rows([])) // BEGIN
+      .mockResolvedValueOnce(rows([{ id: 900 }])) // insert notification
+      .mockResolvedValueOnce(rows([])); // COMMIT
 
     const res = await request(app)
       .post("/api/notifications")
@@ -103,16 +107,15 @@ describe("POST /api/notifications", () => {
 
     expect(res.status).toBe(201);
     expect(res.body.recipientCount).toBe(0);
-    expect(conn.query).toHaveBeenCalledTimes(1);
+    expect(mockQuery).toHaveBeenCalledTimes(4);
   });
 
   it("rolls back and 500s when the transaction throws", async () => {
     mockIsFeatureEnabled.mockResolvedValueOnce(true);
-    mockQuery.mockResolvedValueOnce(rows([]));
-
-    const conn = mockConnection();
-    mockGetConnection.mockResolvedValueOnce(conn);
-    conn.query.mockRejectedValueOnce(new Error("insert failed"));
+    mockQuery
+      .mockResolvedValueOnce(rows([])) // no recipients
+      .mockResolvedValueOnce(rows([])) // BEGIN
+      .mockRejectedValueOnce(new Error("insert failed")); // insert notification fails
 
     const res = await request(app)
       .post("/api/notifications")
@@ -120,7 +123,7 @@ describe("POST /api/notifications", () => {
       .send({ audience: "staff", title: "Hi", message: "Hello" });
 
     expect(res.status).toBe(500);
-    expect(conn.rollback).toHaveBeenCalled();
+    expect(mockQuery).toHaveBeenCalledWith("ROLLBACK");
   });
 });
 
@@ -129,7 +132,7 @@ describe("GET /api/notifications/sent", () => {
     mockQuery.mockResolvedValueOnce(rows([]));
     const res = await request(app).get("/api/notifications/sent").set("Cookie", adminCookie);
     expect(res.status).toBe(200);
-    expect(mockQuery.mock.calls[0][0]).toMatch(/WHERE n.school_id = \?/);
+    expect(mockQuery.mock.calls[0][0]).toMatch(/WHERE n.school_id = \$1/);
   });
 
   it("does not scope for system_admin", async () => {
@@ -166,9 +169,7 @@ describe("POST /api/notifications/:id/read", () => {
 
   it("404s when the notification does not belong to the caller", async () => {
     mockIsFeatureEnabled.mockResolvedValueOnce(true);
-    mockQuery
-      .mockResolvedValueOnce(rows({ affectedRows: 0 }))
-      .mockResolvedValueOnce(rows([]));
+    mockQuery.mockResolvedValueOnce(rows([])).mockResolvedValueOnce(rows([]));
 
     const res = await request(app).post("/api/notifications/1/read").set("Cookie", parentCookie);
     expect(res.status).toBe(404);
@@ -176,9 +177,7 @@ describe("POST /api/notifications/:id/read", () => {
 
   it("200s (no-op) when it was already marked read", async () => {
     mockIsFeatureEnabled.mockResolvedValueOnce(true);
-    mockQuery
-      .mockResolvedValueOnce(rows({ affectedRows: 0 }))
-      .mockResolvedValueOnce(rows([{ x: 1 }]));
+    mockQuery.mockResolvedValueOnce(rows([])).mockResolvedValueOnce(rows([{ x: 1 }]));
 
     const res = await request(app).post("/api/notifications/1/read").set("Cookie", parentCookie);
     expect(res.status).toBe(200);
@@ -186,7 +185,7 @@ describe("POST /api/notifications/:id/read", () => {
 
   it("marks the notification as read", async () => {
     mockIsFeatureEnabled.mockResolvedValueOnce(true);
-    mockQuery.mockResolvedValueOnce(rows({ affectedRows: 1 }));
+    mockQuery.mockResolvedValueOnce(rows([{ id: 1 }]));
 
     const res = await request(app).post("/api/notifications/1/read").set("Cookie", parentCookie);
     expect(res.status).toBe(200);

@@ -68,7 +68,7 @@ const Navbar: React.FC<NavbarProps> = ({ onMenuClick }) => {
       </div>
 
       {/* CENTER: TITLE */}
-      <h2 className="navbar-title" style={styles.navTitle}>ilm School Portal</h2>
+      <h2 className="navbar-title" style={styles.navTitle}>Ilm Tracker</h2>
 
       {/* RIGHT: USER + LOGOUT */}
       <div style={styles.navRight}>

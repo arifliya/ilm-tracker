@@ -12,7 +12,7 @@
 -- school, with no index to seek on — full table scan today, and it only
 -- gets slower as attendance accumulates.
 
-ALTER TABLE attendance ADD INDEX idx_attendance_date (date);
+CREATE INDEX idx_attendance_date ON attendance (date);
 
 -- ============================
 -- NOTIFICATIONS — sent list ordering
@@ -26,13 +26,13 @@ ALTER TABLE attendance ADD INDEX idx_attendance_date (date);
 -- replaces rather than joins it — no point paying the write overhead of
 -- two indexes doing overlapping work.
 
--- Add the replacement before dropping the old one — MySQL refuses to drop
--- idx_notifications_school while it's the only index satisfying the
--- school_id foreign key, even though the new composite's leftmost column
--- covers the same constraint.
-ALTER TABLE notifications ADD INDEX idx_notifications_school_created (school_id, created_at);
-ALTER TABLE notifications DROP INDEX idx_notifications_school;
+-- Kept as add-then-drop (originally required by a MySQL FK-index-
+-- dependency quirk that doesn't apply to Postgres) since the ordering is
+-- harmless either way and keeps this changeset's history-following diff
+-- minimal.
+CREATE INDEX idx_notifications_school_created ON notifications (school_id, created_at);
+DROP INDEX idx_notifications_school;
 
---rollback ALTER TABLE notifications ADD INDEX idx_notifications_school (school_id);
---rollback ALTER TABLE notifications DROP INDEX idx_notifications_school_created;
---rollback ALTER TABLE attendance DROP INDEX idx_attendance_date;
+--rollback CREATE INDEX idx_notifications_school ON notifications (school_id);
+--rollback DROP INDEX idx_notifications_school_created;
+--rollback DROP INDEX idx_attendance_date;

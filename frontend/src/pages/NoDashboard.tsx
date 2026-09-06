@@ -5,11 +5,21 @@ import { api } from "../api";
 import { publicStyles as styles } from "../styles/publicStyles";
 import { formatDate } from "../utils/formatDate";
 
+interface NotificationItem {
+  id: number;
+  title: string;
+  message: string;
+  created_at: string;
+  read_at: string | null;
+  sender_first_name: string;
+  sender_last_name: string;
+}
+
 const NoDashboard: React.FC = () => {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
 
-  const [notifications, setNotifications] = useState<any[]>([]);
+  const [notifications, setNotifications] = useState<NotificationItem[]>([]);
 
   useEffect(() => {
     api
@@ -61,7 +71,7 @@ const NoDashboard: React.FC = () => {
             <h3 style={{ ...styles.sectionTitle, marginBottom: 12 }}>Notifications</h3>
 
             <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-              {notifications.map((n: any) => {
+              {notifications.map((n) => {
                 const isUnread = !n.read_at;
                 return (
                   <div

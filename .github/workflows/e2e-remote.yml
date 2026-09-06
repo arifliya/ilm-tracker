@@ -1,0 +1,83 @@
+name: E2E (remote environment)
+
+# Manual-only — runs the Playwright suite against an already-deployed
+# environment instead of the ephemeral local stack ci.yml's own `e2e` job
+# builds itself. No push/pull_request trigger: unlike ci.yml, this targets
+# real shared infrastructure, so it only ever runs when someone deliberately
+# asks for it.
+#
+# `environment` is restricted to `staging` — there is deliberately no
+# `live`/`production` option. Every journey in this suite creates, edits,
+# or deletes real-looking data (students, parents, notifications, feature
+# flags, ...); running it against production would corrupt real records.
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Environment to run against
+        required: true
+        type: choice
+        options:
+          - staging
+
+jobs:
+  e2e-remote:
+    name: E2E (Playwright) — ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    # E2E_STAGING_BASE_URL (and CLOUDFLARE-style secrets elsewhere in this
+    # repo) live under the STAGING GitHub Environment, not as repo-level
+    # secrets — a job only sees an Environment's secrets if it declares
+    # that environment here. Hardcoded rather than driven off the
+    # `inputs.environment` choice (currently "staging", lowercase) since
+    # the GitHub Environment itself is named "STAGING" and there's only
+    # ever the one option today.
+    environment: STAGING
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 26
+          cache: npm
+          cache-dependency-path: e2e/package-lock.json
+
+      - run: npm ci
+        working-directory: e2e
+      - run: npx playwright install --with-deps chromium
+        working-directory: e2e
+
+      # Written to e2e/.env (not exported directly) so this goes through
+      # exactly the same code path — scripts/run-e2e.sh and
+      # playwright.config.ts — as a developer running it locally. Set
+      # E2E_STAGING_BASE_URL as a repo/environment secret to
+      # https://ilm-tracker-staging.pages.dev.
+      #
+      # E2E_STAGING_SEED_PASSWORD is optional and usually left unset —
+      # falls back to the same shared E2E_SEED_PASSWORD repo secret
+      # ci.yml's own local run uses, since staging's accounts have also
+      # verified to work with that value (staging is forked from real
+      # production data, not a fresh seed.sql load, so this isn't
+      # guaranteed to hold forever — only set E2E_STAGING_SEED_PASSWORD
+      # if staging's actual passwords have since diverged from it).
+      - name: Create e2e/.env from GitHub secrets
+        run: |
+          cat > e2e/.env <<EOF
+          E2E_BASE_URL=${{ secrets.E2E_STAGING_BASE_URL }}
+          E2E_SEED_PASSWORD=${STAGING_SEED_PASSWORD:-$SEED_PASSWORD}
+          E2E_BYPASS_TOKEN=${{ secrets.E2E_STAGING_BYPASS_TOKEN }}
+          EOF
+        env:
+          STAGING_SEED_PASSWORD: ${{ secrets.E2E_STAGING_SEED_PASSWORD }}
+          SEED_PASSWORD: ${{ secrets.E2E_SEED_PASSWORD }}
+
+      - run: ./scripts/run-e2e.sh --all
+
+      - name: Upload Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-${{ inputs.environment }}
+          path: |
+            e2e/playwright-report/
+            e2e/test-results/
+          retention-days: 14

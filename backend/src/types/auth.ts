@@ -1,5 +1,3 @@
-import { Request } from "express";
-
 export type RoleName =
   | "system_admin"
   | "owner"
@@ -34,8 +32,4 @@ export interface JwtPayload {
   // it's only ever cleared by completing that endpoint — never by a plain
   // token refresh, so it can't quietly expire out from under the block.
   mustResetPassword: boolean;
-}
-
-export interface AuthenticatedRequest extends Request {
-  user?: JwtPayload;
 }

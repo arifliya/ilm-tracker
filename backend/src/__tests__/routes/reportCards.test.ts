@@ -3,22 +3,29 @@ jest.mock("../../utils/featureFlags", () => ({
   isFeatureEnabled: jest.fn()
 }));
 
-import request from "supertest";
-import { app } from "../../app";
-import { pool } from "../../config/db";
-import { rows, mockConnection } from "../helpers/db";
+import app from "../../app";
+import { rows } from "../helpers/db";
 import { authCookie } from "../helpers/auth";
+import { request } from "../helpers/request";
 import { isFeatureEnabled } from "../../utils/featureFlags";
 
-const mockQuery = pool.query as jest.Mock;
-const mockGetConnection = pool.getConnection as jest.Mock;
+const { mockDb } = jest.requireMock<typeof import("../../config/__mocks__/db")>("../../config/db");
+const mockQuery = mockDb.query as jest.Mock;
 const mockIsFeatureEnabled = isFeatureEnabled as jest.Mock;
 
-const teacherCookie = authCookie({ userId: 1, role: "teacher", schoolId: 10 });
-const adminCookie = authCookie({ userId: 2, role: "admin", schoolId: 10 });
-const parentCookie = authCookie({ userId: 3, role: "parent", schoolId: 10 });
-const studentCookie = authCookie({ userId: 4, role: "student", schoolId: 10 });
-const ownerCookie = authCookie({ userId: 5, role: "owner", schoolId: 10 });
+let teacherCookie: string;
+let adminCookie: string;
+let parentCookie: string;
+let studentCookie: string;
+let ownerCookie: string;
+
+beforeAll(async () => {
+  teacherCookie = await authCookie({ userId: 1, role: "teacher", schoolId: 10 });
+  adminCookie = await authCookie({ userId: 2, role: "admin", schoolId: 10 });
+  parentCookie = await authCookie({ userId: 3, role: "parent", schoolId: 10 });
+  studentCookie = await authCookie({ userId: 4, role: "student", schoolId: 10 });
+  ownerCookie = await authCookie({ userId: 5, role: "owner", schoolId: 10 });
+});
 
 const validSubjects = [{ subject_name: "Maths", grade: "A", comment: "Great progress" }];
 
@@ -67,7 +74,7 @@ describe("POST /api/report-cards/terms", () => {
   });
 
   it("409s on a duplicate term name for the school", async () => {
-    mockQuery.mockRejectedValueOnce({ code: "ER_DUP_ENTRY" });
+    mockQuery.mockRejectedValueOnce({ code: "23505" });
     const res = await request(app)
       .post("/api/report-cards/terms")
       .set("Cookie", adminCookie)
@@ -76,7 +83,7 @@ describe("POST /api/report-cards/terms", () => {
   });
 
   it("creates a term", async () => {
-    mockQuery.mockResolvedValueOnce([{ insertId: 7 }]);
+    mockQuery.mockResolvedValueOnce(rows([{ id: 7 }]));
     const res = await request(app)
       .post("/api/report-cards/terms")
       .set("Cookie", adminCookie)
@@ -239,13 +246,11 @@ describe("POST /api/report-cards/students/:studentId", () => {
 
   it("409s when a report card already exists for this student and term", async () => {
     mockQuery
-      .mockResolvedValueOnce(rows([{ id: 1, school_id: 10, parent_id: 5 }]))
-      .mockResolvedValueOnce(rows([{ id: 1 }])); // term lookup -> ok
+      .mockResolvedValueOnce(rows([{ id: 1, school_id: 10, parent_id: 5 }])) // loadStudent
+      .mockResolvedValueOnce(rows([{ id: 1 }])) // term lookup -> ok
+      .mockResolvedValueOnce(rows([])) // BEGIN
+      .mockRejectedValueOnce({ code: "23505" }); // insert report_cards
     mockIsFeatureEnabled.mockResolvedValueOnce(true);
-
-    const conn = mockConnection();
-    mockGetConnection.mockResolvedValueOnce(conn);
-    conn.query.mockRejectedValueOnce({ code: "ER_DUP_ENTRY" });
 
     const res = await request(app)
       .post("/api/report-cards/students/1")
@@ -253,21 +258,19 @@ describe("POST /api/report-cards/students/:studentId", () => {
       .send({ term_id: 1, subjects: validSubjects });
 
     expect(res.status).toBe(409);
-    expect(conn.rollback).toHaveBeenCalled();
+    expect(mockQuery).toHaveBeenCalledWith("ROLLBACK");
   });
 
   it("creates a report card with its subjects", async () => {
     mockQuery
-      .mockResolvedValueOnce(rows([{ id: 1, school_id: 10, parent_id: 5 }]))
+      .mockResolvedValueOnce(rows([{ id: 1, school_id: 10, parent_id: 5 }])) // loadStudent
       .mockResolvedValueOnce(rows([{ x: 1 }])) // teachesStudent -> true
-      .mockResolvedValueOnce(rows([{ id: 1 }])); // term lookup -> ok
+      .mockResolvedValueOnce(rows([{ id: 1 }])) // term lookup -> ok
+      .mockResolvedValueOnce(rows([])) // BEGIN
+      .mockResolvedValueOnce(rows([{ id: 200 }])) // insert report_cards RETURNING id
+      .mockResolvedValueOnce(rows([])) // insert report_card_subjects
+      .mockResolvedValueOnce(rows([])); // COMMIT
     mockIsFeatureEnabled.mockResolvedValueOnce(true);
-
-    const conn = mockConnection();
-    mockGetConnection.mockResolvedValueOnce(conn);
-    conn.query
-      .mockResolvedValueOnce([{ insertId: 200 }]) // insert report_cards
-      .mockResolvedValueOnce([{}]); // insert report_card_subjects
 
     const res = await request(app)
       .post("/api/report-cards/students/1")
@@ -276,7 +279,7 @@ describe("POST /api/report-cards/students/:studentId", () => {
 
     expect(res.status).toBe(201);
     expect(res.body.reportCard.id).toBe(200);
-    expect(conn.commit).toHaveBeenCalled();
+    expect(mockQuery).toHaveBeenCalledWith("COMMIT");
   });
 });
 
@@ -302,20 +305,19 @@ describe("PUT /api/report-cards/:id", () => {
   });
 
   it("replaces the subject list", async () => {
-    mockQuery.mockResolvedValueOnce(rows([{ id: 100, student_id: 1, school_id: 10, parent_id: 5 }]));
+    mockQuery
+      .mockResolvedValueOnce(rows([{ id: 100, student_id: 1, school_id: 10, parent_id: 5 }])) // loadReportCard
+      .mockResolvedValueOnce(rows([])) // BEGIN
+      .mockResolvedValueOnce(rows([])) // delete existing subjects
+      .mockResolvedValueOnce(rows([])) // insert new subjects
+      .mockResolvedValueOnce(rows([])) // touch updated_at
+      .mockResolvedValueOnce(rows([])); // COMMIT
     mockIsFeatureEnabled.mockResolvedValueOnce(true);
-
-    const conn = mockConnection();
-    mockGetConnection.mockResolvedValueOnce(conn);
-    conn.query
-      .mockResolvedValueOnce([{}]) // delete existing subjects
-      .mockResolvedValueOnce([{}]) // insert new subjects
-      .mockResolvedValueOnce([{}]); // touch updated_at
 
     const res = await request(app).put("/api/report-cards/100").set("Cookie", adminCookie).send({ subjects: validSubjects });
 
     expect(res.status).toBe(200);
-    expect(conn.commit).toHaveBeenCalled();
+    expect(mockQuery).toHaveBeenCalledWith("COMMIT");
   });
 });
 
@@ -341,7 +343,7 @@ describe("DELETE /api/report-cards/:id", () => {
   it("deletes the report card", async () => {
     mockQuery
       .mockResolvedValueOnce(rows([{ id: 100, student_id: 1, school_id: 10, parent_id: 5 }]))
-      .mockResolvedValueOnce(rows({}));
+      .mockResolvedValueOnce(rows([]));
     mockIsFeatureEnabled.mockResolvedValueOnce(true);
     const res = await request(app).delete("/api/report-cards/100").set("Cookie", adminCookie);
     expect(res.status).toBe(200);

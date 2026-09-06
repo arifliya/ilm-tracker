@@ -46,10 +46,13 @@ describe("SystemAdminDashboard (smoke)", () => {
     mockGet.mockImplementation((url: string) => {
       if (url === "/admin/users-all") {
         return Promise.resolve({
-          data: [
-            { id: 9, username: "owner1", email: "owner1@example.com", role: "owner", school_name: "Ilm School" },
-            { id: 10, username: "teacher1", email: "teacher1@example.com", role: "teacher", school_name: "Ilm School" }
-          ]
+          data: {
+            users: [
+              { id: 9, username: "owner1", email: "owner1@example.com", role: "owner", school_name: "Ilm School" },
+              { id: 10, username: "teacher1", email: "teacher1@example.com", role: "teacher", school_name: "Ilm School" }
+            ],
+            total: 2
+          }
         });
       }
       return Promise.resolve({ data: [] });
@@ -80,15 +83,18 @@ describe("SystemAdminDashboard (smoke)", () => {
     mockGet.mockImplementation((url: string) => {
       if (url === "/admin/students-parents") {
         return Promise.resolve({
-          data: [
-            {
-              student_id: 701,
-              student_user_id: null,
-              student_first_name: "Amy",
-              student_last_name: "Doe",
-              guardians: []
-            }
-          ]
+          data: {
+            studentsParents: [
+              {
+                student_id: 701,
+                student_user_id: null,
+                student_first_name: "Amy",
+                student_last_name: "Doe",
+                guardians: []
+              }
+            ],
+            total: 1
+          }
         });
       }
       return Promise.resolve({ data: [] });

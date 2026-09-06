@@ -1,0 +1,4 @@
+# React Router owns every non-file path — fall back to index.html so
+# direct navigation/refresh on routes like /login or /dashboard don't
+# hit a raw 404. Replaces nginx.conf's `try_files $uri $uri/ /index.html`.
+/*  /index.html  200

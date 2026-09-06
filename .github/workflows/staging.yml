@@ -1,0 +1,271 @@
+name: Deploy to Staging
+
+# Manual trigger only, with a ref input (defaults to main, but can point
+# at any branch/PR ref) — deliberately not automatic on every merge, so
+# staging doesn't churn on every push and can also be used to check an
+# unmerged branch before it lands on main. Unlike deploy.yml, there's no
+# ancestor-of-main check here: staging is explicitly allowed to deploy
+# whatever ref is asked for.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch, tag, or commit to deploy to staging
+        required: false
+        type: string
+        default: main
+      seed:
+        description: >-
+          Also load mysql/seed.sql demo/test data after migrating. Only
+          safe on a database that doesn't already have this data —
+          mysql/seed.sql has no ON CONFLICT guards, so running it against
+          an already-seeded staging database fails on duplicate
+          usernames/school codes instead of updating anything.
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: deploy-staging
+  cancel-in-progress: false
+
+jobs:
+  test-backend:
+    name: Backend test/build gate
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 26
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build
+      - run: npx @redocly/cli lint openapi.yaml
+
+  test-frontend:
+    name: Frontend test/build gate
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 26
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build
+
+  migrate-staging-database:
+    name: Check + apply staging database migrations
+    needs: [test-backend, test-frontend]
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: liquibase
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+
+      # Same parse/mask/status/apply pattern as deploy.yml's own
+      # migrate-database job — just a different source secret
+      # (STAGING_DATABASE_URL, the Neon staging branch) and a different
+      # step summary label so the two are easy to tell apart in the logs.
+      - name: Parse STAGING_DATABASE_URL into JDBC pieces
+        id: dburl
+        run: |
+          node -e '
+            const u = new URL(process.env.DATABASE_URL);
+            const host = u.hostname + (u.port ? ":" + u.port : "");
+            const db = u.pathname.replace(/^\//, "");
+            const params = new URLSearchParams(u.search);
+            if (!params.has("sslmode")) params.set("sslmode", "require");
+            console.log(`jdbc_url=jdbc:postgresql://${host}/${db}?${params.toString()}`);
+            console.log(`username=${decodeURIComponent(u.username)}`);
+          ' >> "$GITHUB_OUTPUT"
+          # Password is written separately so it never appears in this
+          # step's own stdout/logs, only piped straight into GITHUB_OUTPUT.
+          node -e 'console.log(decodeURIComponent(new URL(process.env.DATABASE_URL).password))' | \
+            (read -r pw; echo "password=$pw" >> "$GITHUB_OUTPUT")
+        env:
+          DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
+
+      - name: Mask parsed credentials in logs
+        run: |
+          echo "::add-mask::${{ steps.dburl.outputs.username }}"
+          echo "::add-mask::${{ steps.dburl.outputs.password }}"
+
+      - name: Check for pending changesets
+        id: status
+        run: |
+          OUTPUT=$(docker run --rm \
+            -v "$(pwd)/changelog:/liquibase/changelog" \
+            -v "$(pwd)/drivers:/liquibase/lib" \
+            -e LIQUIBASE_COMMAND_URL="${{ steps.dburl.outputs.jdbc_url }}" \
+            -e LIQUIBASE_COMMAND_USERNAME="${{ steps.dburl.outputs.username }}" \
+            -e LIQUIBASE_COMMAND_PASSWORD="${{ steps.dburl.outputs.password }}" \
+            -e LIQUIBASE_COMMAND_CHANGELOG_FILE="changelog/changelog-master.xml" \
+            liquibase/liquibase:4.29 status --verbose)
+          echo "$OUTPUT"
+          {
+            echo "### Liquibase status (staging)"
+            echo '```'
+            echo "$OUTPUT"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if echo "$OUTPUT" | grep -q "is up to date"; then
+            echo "pending=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "pending=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Apply pending changesets
+        if: steps.status.outputs.pending == 'true'
+        run: |
+          docker run --rm \
+            -v "$(pwd)/changelog:/liquibase/changelog" \
+            -v "$(pwd)/drivers:/liquibase/lib" \
+            -e LIQUIBASE_COMMAND_URL="${{ steps.dburl.outputs.jdbc_url }}" \
+            -e LIQUIBASE_COMMAND_USERNAME="${{ steps.dburl.outputs.username }}" \
+            -e LIQUIBASE_COMMAND_PASSWORD="${{ steps.dburl.outputs.password }}" \
+            -e LIQUIBASE_COMMAND_CHANGELOG_FILE="changelog/changelog-master.xml" \
+            liquibase/liquibase:4.29 update
+          echo "Applied pending changesets." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: No pending changesets
+        if: steps.status.outputs.pending == 'false'
+        run: echo "No pending changesets — skipping update." >> "$GITHUB_STEP_SUMMARY"
+
+  seed-staging-database:
+    name: Load demo/test data into staging
+    needs: migrate-staging-database
+    if: ${{ inputs.seed }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+
+      # ON_ERROR_STOP so a duplicate-key hit (re-running this against a
+      # database that already has this data — mysql/seed.sql has no
+      # ON CONFLICT guards) fails the job loudly instead of psql silently
+      # continuing past the error and leaving a half-seeded, partially
+      # duplicated database.
+      - name: Load mysql/seed.sql into staging
+        run: |
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f mysql/seed.sql
+          echo "Loaded mysql/seed.sql into staging." >> "$GITHUB_STEP_SUMMARY"
+        env:
+          DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
+
+  deploy-staging-backend:
+    name: Deploy backend to staging (Worker)
+    needs: migrate-staging-database
+    runs-on: ubuntu-latest
+    # CLOUDFLARE_API_TOKEN/CLOUDFLARE_ACCOUNT_ID live under the STAGING
+    # GitHub Environment, not as repo-level secrets/vars — a job only sees
+    # an Environment's secrets if it declares that environment here.
+    environment: STAGING
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 26
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - run: npm ci
+
+      # Worker secrets (c.env at runtime) are a separate store from GitHub
+      # Actions secrets (only ever visible to workflow steps) — nothing
+      # populates them just by existing in GitHub, so every deploy pushes
+      # the current GitHub secret values into Cloudflare's store here.
+      # GitHub secrets stay the single source of truth; this keeps the
+      # Worker in sync with them instead of relying on someone remembering
+      # to run `wrangler secret put` by hand after a rotation.
+      - name: Sync staging Worker secrets
+        run: |
+          echo "$DATABASE_URL" | npx wrangler secret put DATABASE_URL --env staging
+          echo "$JWT_SECRET" | npx wrangler secret put JWT_SECRET --env staging
+          echo "$DIRECT_DEBIT_WEBHOOK_SECRET" | npx wrangler secret put DIRECT_DEBIT_WEBHOOK_SECRET --env staging
+          echo "$E2E_TEST_BYPASS_SECRET" | npx wrangler secret put E2E_TEST_BYPASS_SECRET --env staging
+        env:
+          DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
+          JWT_SECRET: ${{ secrets.STAGING_JWT_SECRET }}
+          DIRECT_DEBIT_WEBHOOK_SECRET: ${{ secrets.STAGING_DIRECT_DEBIT_WEBHOOK_SECRET }}
+          E2E_TEST_BYPASS_SECRET: ${{ secrets.E2E_STAGING_BYPASS_TOKEN }}
+
+      - run: npx wrangler deploy --env staging
+
+      - name: Smoke test
+        run: |
+          sleep 5
+          curl -sf https://ilm-backend-staging.jassat-ibrahim.workers.dev/healthz
+
+  deploy-staging-frontend:
+    name: Deploy frontend to staging (Pages)
+    needs: migrate-staging-database
+    runs-on: ubuntu-latest
+    environment: STAGING
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 26
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - run: npm ci
+      - run: npm run build
+        env:
+          VITE_API_URL: https://ilm-backend-staging.jassat-ibrahim.workers.dev/api
+
+      # A genuinely separate Pages project (ilm-tracker-staging), not
+      # a branch alias on the production project — mirrors the backend's
+      # separate-Worker setup (ilm-backend vs ilm-backend-staging), so
+      # staging shows up as its own resource in the dashboard instead of
+      # a branch tucked inside the production project's deployment list.
+      # --branch main pins this to that project's own production-branch
+      # domain regardless of whatever ref is actually checked out, same
+      # reasoning as deploy.yml's prod deploy.
+      - run: npx wrangler pages deploy dist --project-name=ilm-tracker-staging --branch main
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}

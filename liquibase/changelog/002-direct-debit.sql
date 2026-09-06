@@ -9,16 +9,17 @@
 -- ============================
 
 CREATE TABLE payment_mandates (
-  id INT AUTO_INCREMENT PRIMARY KEY,
+  id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   parent_id INT NOT NULL,
   provider VARCHAR(50) NOT NULL DEFAULT 'stub',
   provider_customer_id VARCHAR(255) NOT NULL,
   provider_mandate_id VARCHAR(255) NOT NULL,
-  status ENUM('pending', 'active', 'cancelled') NOT NULL DEFAULT 'pending',
+  status VARCHAR(20) NOT NULL DEFAULT 'pending'
+    CONSTRAINT payment_mandates_status_check CHECK (status IN ('pending', 'active', 'cancelled')),
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   cancelled_at TIMESTAMP NULL,
   FOREIGN KEY (parent_id) REFERENCES parents(id) ON DELETE CASCADE,
-  UNIQUE KEY uq_payment_mandates_parent (parent_id)
+  CONSTRAINT uq_payment_mandates_parent UNIQUE (parent_id)
 );
 
 -- ============================
@@ -27,17 +28,25 @@ CREATE TABLE payment_mandates (
 -- confirmation) and failed (bounced — insufficient funds, mandate
 -- cancelled, ...). marked_paid_by_user_id was already nullable, which
 -- now also covers a provider-confirmed payment with no human "marker".
+--
+-- The original status CHECK constraint (from 001) is dropped and
+-- re-added widened, since Postgres has no in-place "MODIFY COLUMN"
+-- equivalent for a CHECK's allowed values.
 -- ============================
 
+ALTER TABLE student_fees DROP CONSTRAINT student_fees_status_check;
+ALTER TABLE student_fees ADD CONSTRAINT student_fees_status_check
+  CHECK (status IN ('unpaid', 'paid', 'pending_collection', 'failed'));
+
 ALTER TABLE student_fees
-  MODIFY COLUMN status ENUM('unpaid', 'paid', 'pending_collection', 'failed') NOT NULL DEFAULT 'unpaid',
-  ADD COLUMN payment_method ENUM('manual', 'direct_debit') NOT NULL DEFAULT 'manual' AFTER status,
-  ADD COLUMN provider_payment_id VARCHAR(255) NULL AFTER payment_method,
-  ADD COLUMN failure_reason VARCHAR(255) NULL AFTER provider_payment_id;
+  ADD COLUMN payment_method VARCHAR(20) NOT NULL DEFAULT 'manual'
+    CONSTRAINT student_fees_payment_method_check CHECK (payment_method IN ('manual', 'direct_debit')),
+  ADD COLUMN provider_payment_id VARCHAR(255) NULL,
+  ADD COLUMN failure_reason VARCHAR(255) NULL;
 
 -- Nullable and unique — a fee submitted for collection gets one, a manual
 -- fee never does, and the webhook looks a fee up by this column.
-ALTER TABLE student_fees ADD UNIQUE KEY uq_student_fees_provider_payment (provider_payment_id);
+ALTER TABLE student_fees ADD CONSTRAINT uq_student_fees_provider_payment UNIQUE (provider_payment_id);
 
 -- ============================
 -- FEATURE FLAG
@@ -55,10 +64,11 @@ VALUES (
 -- INDEXES
 -- ============================
 
-ALTER TABLE payment_mandates ADD INDEX idx_payment_mandates_status (status);
+CREATE INDEX idx_payment_mandates_status ON payment_mandates (status);
 
---rollback ALTER TABLE student_fees DROP INDEX uq_student_fees_provider_payment;
+--rollback ALTER TABLE student_fees DROP CONSTRAINT uq_student_fees_provider_payment;
 --rollback ALTER TABLE student_fees DROP COLUMN failure_reason, DROP COLUMN provider_payment_id, DROP COLUMN payment_method;
---rollback ALTER TABLE student_fees MODIFY COLUMN status ENUM('unpaid', 'paid') NOT NULL DEFAULT 'unpaid';
+--rollback ALTER TABLE student_fees DROP CONSTRAINT student_fees_status_check;
+--rollback ALTER TABLE student_fees ADD CONSTRAINT student_fees_status_check CHECK (status IN ('unpaid', 'paid'));
 --rollback DROP TABLE IF EXISTS payment_mandates;
 --rollback DELETE FROM feature_flags WHERE feature_key = 'direct_debit';

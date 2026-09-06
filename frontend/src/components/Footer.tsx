@@ -13,7 +13,7 @@ const Footer: React.FC = () => {
         borderTop: "1px solid #e2e8f0"
       }}
     >
-      <span>&copy; {new Date().getFullYear()} ilm School Portal.</span>{" "}
+      <span>&copy; {new Date().getFullYear()} Ilm Tracker.</span>{" "}
       <Link to="/privacy-policy" style={{ color: "#475569", textDecoration: "underline" }}>
         Privacy Policy
       </Link>

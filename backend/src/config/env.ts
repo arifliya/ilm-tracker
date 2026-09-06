@@ -1,53 +1,56 @@
-import dotenv from "dotenv";
-dotenv.config();
+import type { Context } from "hono";
+import type { AppEnv } from "../types/env";
 
-function required(name: string): string {
-  const value = process.env[name];
+// Workers config comes from c.env (wrangler.toml [vars]/secrets, or
+// backend/.dev.vars locally) — there's no process-wide env object to
+// import the way Express's dotenv-based config/env.ts used to provide.
+export function requireEnv(
+  c: Context<AppEnv>,
+  name: "JWT_SECRET" | "DIRECT_DEBIT_WEBHOOK_SECRET"
+): string {
+  const value = c.env[name];
   if (!value) {
     throw new Error(
-      `${name} is not set. Copy backend/.env.example to backend/.env and fill in a real value.`
+      `${name} is not set. Set it with \`wrangler secret put ${name}\` (or add it to backend/.dev.vars for local dev).`
     );
   }
   return value;
 }
 
-// Express's `trust proxy` setting, which determines how far to trust
-// X-Forwarded-* headers — this is what req.ip (and therefore the login/
-// registration rate limiters) actually reads. Defaults to false (trust
-// nothing), which is correct when the backend is reached directly, as it
-// is in docker-compose today. Set it once this sits behind a real reverse
-// proxy/load balancer, to a hop count (e.g. "1" for a single proxy) or a
-// specific value Express understands ("loopback", an IP/CIDR list, etc.)
-// — see https://expressjs.com/en/guide/behind-proxies.html. Getting this
-// wrong in either direction is a real risk: too trusting lets a client
-// spoof X-Forwarded-For to dodge rate limits, too little collapses every
-// user behind the proxy into one shared rate-limit bucket.
-function parseTrustProxy(value: string): boolean | number | string {
-  if (value === "true") return true;
-  if (value === "false") return false;
-  const asNumber = Number(value);
-  return value.trim() !== "" && !Number.isNaN(asNumber) ? asNumber : value;
+export function isCookieSecure(c: Context<AppEnv>): boolean {
+  return c.env.COOKIE_SECURE === "true";
 }
 
-export const env = {
-  NODE_ENV: process.env.NODE_ENV || "development",
-  PORT: process.env.PORT || 4000,
-  DB_HOST: process.env.DB_HOST || "db",
-  DB_USER: process.env.DB_USER || "ilmuser",
-  DB_PASSWORD: required("DB_PASSWORD"),
-  DB_NAME: process.env.DB_NAME || "ilm",
-  JWT_SECRET: required("JWT_SECRET"),
-  // Signs/verifies the direct-debit provider webhook (see
-  // utils/directDebitProvider.ts). Only the stub provider is wired up
-  // today, but this is checked the same way a real provider's webhook
-  // secret would be, so swapping providers later doesn't touch this.
-  DIRECT_DEBIT_WEBHOOK_SECRET: required("DIRECT_DEBIT_WEBHOOK_SECRET"),
-  COOKIE_SECURE: process.env.COOKIE_SECURE === "true",
-  // Comma-separated list of allowed frontend origins, e.g.
-  // "https://app.example.com,https://staging.example.com"
-  CORS_ORIGIN: (process.env.CORS_ORIGIN || "http://localhost:5173")
+// Comma-separated list of allowed frontend origins, e.g.
+// "https://app.example.com,https://staging.example.com"
+export function corsOrigins(c: Context<AppEnv>): string[] {
+  return (c.env.CORS_ORIGIN || "http://localhost:5173")
     .split(",")
     .map(origin => origin.trim())
-    .filter(Boolean),
-  TRUST_PROXY: parseTrustProxy(process.env.TRUST_PROXY || "false")
-};
+    .filter(Boolean);
+}
+
+// Every Cloudflare Pages branch-preview deployment gets its own
+// "<branch-name>.<project>.pages.dev" alias — a new one every time a
+// feature branch is created, renamed, or replaced. Hardcoding each of
+// those into CORS_ORIGIN as they come and go means it permanently
+// accumulates stale entries for branches that no longer exist (the
+// original version of this list still had one from a renamed branch
+// months after that branch was gone). Since any subdomain of a
+// configured origin's own hostname is still a deployment under our own
+// Cloudflare Pages project — not an origin an attacker could ever
+// control — trusting the whole subdomain tree of each configured origin
+// covers every past/future preview and staging alias automatically, so
+// nothing ever needs to be added or cleaned up by hand again.
+export function isOriginAllowed(configuredOrigins: string[], origin: string): boolean {
+  return configuredOrigins.some(allowed => {
+    if (origin === allowed) return true;
+    try {
+      const allowedHost = new URL(allowed).hostname;
+      const originUrl = new URL(origin);
+      return originUrl.protocol === new URL(allowed).protocol && originUrl.hostname.endsWith(`.${allowedHost}`);
+    } catch {
+      return false;
+    }
+  });
+}

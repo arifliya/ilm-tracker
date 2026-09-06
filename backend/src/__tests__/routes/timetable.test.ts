@@ -3,20 +3,27 @@ jest.mock("../../utils/featureFlags", () => ({
   isFeatureEnabled: jest.fn()
 }));
 
-import request from "supertest";
-import { app } from "../../app";
-import { pool } from "../../config/db";
+import app from "../../app";
 import { rows } from "../helpers/db";
 import { authCookie } from "../helpers/auth";
+import { request } from "../helpers/request";
 import { isFeatureEnabled } from "../../utils/featureFlags";
 
-const mockQuery = pool.query as jest.Mock;
+const { mockDb } = jest.requireMock<typeof import("../../config/__mocks__/db")>("../../config/db");
+const mockQuery = mockDb.query as jest.Mock;
 const mockIsFeatureEnabled = isFeatureEnabled as jest.Mock;
 
-const adminCookie = authCookie({ userId: 1, role: "admin", schoolId: 10 });
-const ownerCookie = authCookie({ userId: 2, role: "owner", schoolId: 10 });
-const teacherCookie = authCookie({ userId: 3, role: "teacher", schoolId: 10 });
-const parentCookie = authCookie({ userId: 4, role: "parent", schoolId: 10 });
+let adminCookie: string;
+let ownerCookie: string;
+let teacherCookie: string;
+let parentCookie: string;
+
+beforeAll(async () => {
+  adminCookie = await authCookie({ userId: 1, role: "admin", schoolId: 10 });
+  ownerCookie = await authCookie({ userId: 2, role: "owner", schoolId: 10 });
+  teacherCookie = await authCookie({ userId: 3, role: "teacher", schoolId: 10 });
+  parentCookie = await authCookie({ userId: 4, role: "parent", schoolId: 10 });
+});
 
 const validSlot = { slot_date: "2026-01-15", start_time: "09:00", end_time: "10:00", subject_name: "Maths" };
 
@@ -67,7 +74,7 @@ describe("POST /api/timetable/terms", () => {
   });
 
   it("409s on a duplicate term name for the school", async () => {
-    mockQuery.mockRejectedValueOnce({ code: "ER_DUP_ENTRY" });
+    mockQuery.mockRejectedValueOnce({ code: "23505" });
     const res = await request(app)
       .post("/api/timetable/terms")
       .set("Cookie", adminCookie)
@@ -76,7 +83,7 @@ describe("POST /api/timetable/terms", () => {
   });
 
   it("creates a term (owner can, unlike report-cards' admin-only terms)", async () => {
-    mockQuery.mockResolvedValueOnce([{ insertId: 7 }]);
+    mockQuery.mockResolvedValueOnce(rows([{ id: 7 }]));
     const res = await request(app)
       .post("/api/timetable/terms")
       .set("Cookie", ownerCookie)
@@ -228,7 +235,7 @@ describe("POST /api/timetable/classes/:classId/slots", () => {
     mockQuery
       .mockResolvedValueOnce(rows([{ school_id: 10 }]))
       .mockResolvedValueOnce(rows([{ id: 1 }])) // resolveTermForDate -> term 1
-      .mockResolvedValueOnce([{ insertId: 6 }]);
+      .mockResolvedValueOnce(rows([{ id: 6 }]));
     mockIsFeatureEnabled.mockResolvedValueOnce(true);
     const { subject_name: _s, ...withoutSubject } = validSlot;
     const res = await request(app).post("/api/timetable/classes/1/slots").set("Cookie", adminCookie).send(withoutSubject);
@@ -259,7 +266,7 @@ describe("POST /api/timetable/classes/:classId/slots", () => {
     mockQuery
       .mockResolvedValueOnce(rows([{ school_id: 10 }]))
       .mockResolvedValueOnce(rows([{ id: 1 }])) // resolveTermForDate -> term 1
-      .mockRejectedValueOnce({ code: "ER_DUP_ENTRY" });
+      .mockRejectedValueOnce({ code: "23505" });
     mockIsFeatureEnabled.mockResolvedValueOnce(true);
     const res = await request(app).post("/api/timetable/classes/1/slots").set("Cookie", adminCookie).send(validSlot);
     expect(res.status).toBe(409);
@@ -269,7 +276,7 @@ describe("POST /api/timetable/classes/:classId/slots", () => {
     mockQuery
       .mockResolvedValueOnce(rows([{ school_id: 10 }]))
       .mockResolvedValueOnce(rows([{ id: 4 }])) // resolveTermForDate -> term 4
-      .mockResolvedValueOnce([{ insertId: 5 }]);
+      .mockResolvedValueOnce(rows([{ id: 5 }]));
     mockIsFeatureEnabled.mockResolvedValueOnce(true);
     const res = await request(app).post("/api/timetable/classes/1/slots").set("Cookie", ownerCookie).send(validSlot);
     expect(res.status).toBe(201);
@@ -302,7 +309,7 @@ describe("PUT /api/timetable/slots/:id", () => {
     mockQuery
       .mockResolvedValueOnce(rows([{ id: 1, class_id: 1, school_id: 10 }]))
       .mockResolvedValueOnce(rows([{ id: 2 }])) // resolveTermForDate -> term 2
-      .mockResolvedValueOnce(rows({}));
+      .mockResolvedValueOnce(rows([]));
     mockIsFeatureEnabled.mockResolvedValueOnce(true);
     const res = await request(app).put("/api/timetable/slots/1").set("Cookie", adminCookie).send(validSlot);
     expect(res.status).toBe(200);
@@ -317,7 +324,7 @@ describe("DELETE /api/timetable/slots/:id", () => {
   });
 
   it("deletes the slot", async () => {
-    mockQuery.mockResolvedValueOnce(rows([{ id: 1, school_id: 10 }])).mockResolvedValueOnce(rows({}));
+    mockQuery.mockResolvedValueOnce(rows([{ id: 1, school_id: 10 }])).mockResolvedValueOnce(rows([]));
     mockIsFeatureEnabled.mockResolvedValueOnce(true);
     const res = await request(app).delete("/api/timetable/slots/1").set("Cookie", adminCookie);
     expect(res.status).toBe(200);
@@ -365,7 +372,7 @@ describe("POST /api/timetable/events", () => {
 
   it("creates an event", async () => {
     mockIsFeatureEnabled.mockResolvedValueOnce(true);
-    mockQuery.mockResolvedValueOnce([{ insertId: 9 }]);
+    mockQuery.mockResolvedValueOnce(rows([{ id: 9 }]));
     const res = await request(app)
       .post("/api/timetable/events")
       .set("Cookie", adminCookie)
@@ -395,7 +402,7 @@ describe("PUT /api/timetable/events/:id", () => {
   });
 
   it("updates the event", async () => {
-    mockQuery.mockResolvedValueOnce(rows([{ id: 1, school_id: 10 }])).mockResolvedValueOnce(rows({}));
+    mockQuery.mockResolvedValueOnce(rows([{ id: 1, school_id: 10 }])).mockResolvedValueOnce(rows([]));
     mockIsFeatureEnabled.mockResolvedValueOnce(true);
     const res = await request(app)
       .put("/api/timetable/events/1")
@@ -413,7 +420,7 @@ describe("DELETE /api/timetable/events/:id", () => {
   });
 
   it("deletes the event", async () => {
-    mockQuery.mockResolvedValueOnce(rows([{ id: 1, school_id: 10 }])).mockResolvedValueOnce(rows({}));
+    mockQuery.mockResolvedValueOnce(rows([{ id: 1, school_id: 10 }])).mockResolvedValueOnce(rows([]));
     mockIsFeatureEnabled.mockResolvedValueOnce(true);
     const res = await request(app).delete("/api/timetable/events/1").set("Cookie", adminCookie);
     expect(res.status).toBe(200);

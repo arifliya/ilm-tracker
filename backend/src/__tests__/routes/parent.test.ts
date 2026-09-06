@@ -3,18 +3,21 @@ jest.mock("../../utils/featureFlags", () => ({
   isFeatureEnabled: jest.fn()
 }));
 
-import request from "supertest";
-import { app } from "../../app";
-import { pool } from "../../config/db";
-import { rows, mockConnection } from "../helpers/db";
+import app from "../../app";
+import { rows } from "../helpers/db";
 import { authCookie } from "../helpers/auth";
+import { request } from "../helpers/request";
 import { isFeatureEnabled } from "../../utils/featureFlags";
 
-const mockQuery = pool.query as jest.Mock;
-const mockGetConnection = pool.getConnection as jest.Mock;
+const { mockDb } = jest.requireMock<typeof import("../../config/__mocks__/db")>("../../config/db");
+const mockQuery = mockDb.query as jest.Mock;
 const mockIsFeatureEnabled = isFeatureEnabled as jest.Mock;
 
-const parentCookie = authCookie({ userId: 1, role: "parent", schoolId: 10 });
+let parentCookie: string;
+
+beforeAll(async () => {
+  parentCookie = await authCookie({ userId: 1, role: "parent", schoolId: 10 });
+});
 
 describe("GET /api/parent/children", () => {
   it("401s without a cookie", async () => {
@@ -82,9 +85,7 @@ describe("POST /api/parent/add-child", () => {
   });
 
   it("400s when the class code does not exist for the parent's school", async () => {
-    mockQuery
-      .mockResolvedValueOnce(rows([{ id: 5, school_id: 10 }]))
-      .mockResolvedValueOnce(rows([]));
+    mockQuery.mockResolvedValueOnce(rows([{ id: 5, school_id: 10 }])).mockResolvedValueOnce(rows([]));
 
     const res = await request(app)
       .post("/api/parent/add-child")
@@ -96,19 +97,16 @@ describe("POST /api/parent/add-child", () => {
   });
 
   it("adds the child, links them to the class and returns the updated list", async () => {
-    const conn = mockConnection();
-    mockGetConnection.mockResolvedValueOnce(conn);
-
     mockQuery
       .mockResolvedValueOnce(rows([{ id: 5, school_id: 10 }])) // parent lookup
       .mockResolvedValueOnce(rows([{ id: 77 }])) // class lookup
-      .mockResolvedValueOnce(rows([{ id: 900, first_name: "Sam", surname: "Doe" }])); // final children list
-
-    conn.query
+      .mockResolvedValueOnce(rows([])) // BEGIN
       .mockResolvedValueOnce(rows([])) // guardian_code uniqueness check
-      .mockResolvedValueOnce([{ insertId: 900 }]) // insert student
-      .mockResolvedValueOnce([{}]) // insert student_guardians
-      .mockResolvedValueOnce([{}]); // insert student_classes
+      .mockResolvedValueOnce(rows([{ id: 900 }])) // insert student RETURNING id
+      .mockResolvedValueOnce(rows([])) // insert student_guardians
+      .mockResolvedValueOnce(rows([])) // insert student_classes
+      .mockResolvedValueOnce(rows([])) // COMMIT
+      .mockResolvedValueOnce(rows([{ id: 900, first_name: "Sam", surname: "Doe" }])); // final children list
 
     const res = await request(app)
       .post("/api/parent/add-child")
@@ -117,19 +115,15 @@ describe("POST /api/parent/add-child", () => {
 
     expect(res.status).toBe(200);
     expect(res.body.message).toMatch(/Child added successfully/);
-    expect(conn.commit).toHaveBeenCalled();
-    expect(conn.query.mock.calls[3][1]).toEqual([900, 77]);
+    expect(mockQuery).toHaveBeenCalledWith("COMMIT");
+    expect(mockQuery.mock.calls[6][1]).toEqual([900, 77]);
   });
 
   it("rolls back and 500s when the transaction throws", async () => {
-    const conn = mockConnection();
-    mockGetConnection.mockResolvedValueOnce(conn);
-
     mockQuery
       .mockResolvedValueOnce(rows([{ id: 5, school_id: 10 }]))
-      .mockResolvedValueOnce(rows([{ id: 77 }]));
-
-    conn.query
+      .mockResolvedValueOnce(rows([{ id: 77 }]))
+      .mockResolvedValueOnce(rows([])) // BEGIN
       .mockResolvedValueOnce(rows([])) // guardian_code uniqueness check
       .mockRejectedValueOnce(new Error("insert failed"));
 
@@ -139,7 +133,7 @@ describe("POST /api/parent/add-child", () => {
       .send(childPayload());
 
     expect(res.status).toBe(500);
-    expect(conn.rollback).toHaveBeenCalled();
+    expect(mockQuery).toHaveBeenCalledWith("ROLLBACK");
   });
 });
 
@@ -184,6 +178,7 @@ describe("GET /api/parent/schedule", () => {
       .mockResolvedValueOnce(
         rows([
           {
+            slot_id: 101,
             student_id: 1,
             child_name: "Sam Doe",
             slot_date: new Date("2026-01-15"),
@@ -195,6 +190,7 @@ describe("GET /api/parent/schedule", () => {
             teacher_surname: "Foster"
           },
           {
+            slot_id: 102,
             student_id: 1,
             child_name: "Sam Doe",
             slot_date: new Date("2026-01-16"),
@@ -213,6 +209,7 @@ describe("GET /api/parent/schedule", () => {
     expect(res.body.schedule).toHaveLength(1);
     expect(res.body.schedule[0].child_name).toBe("Sam Doe");
     expect(res.body.schedule[0].slots).toHaveLength(2);
+    expect(res.body.schedule[0].slots[0].slot_id).toBe(101);
   });
 });
 
@@ -229,18 +226,13 @@ describe("POST /api/parent/link-guardian", () => {
 
   it("400s when guardian_code is missing", async () => {
     mockQuery.mockResolvedValueOnce(rows([{ id: 5, school_id: 10 }]));
-    const res = await request(app)
-      .post("/api/parent/link-guardian")
-      .set("Cookie", parentCookie)
-      .send({});
+    const res = await request(app).post("/api/parent/link-guardian").set("Cookie", parentCookie).send({});
     expect(res.status).toBe(400);
     expect(res.body.message).toMatch(/Guardian code is required/);
   });
 
   it("404s when the guardian code doesn't resolve for this school", async () => {
-    mockQuery
-      .mockResolvedValueOnce(rows([{ id: 5, school_id: 10 }]))
-      .mockResolvedValueOnce(rows([]));
+    mockQuery.mockResolvedValueOnce(rows([{ id: 5, school_id: 10 }])).mockResolvedValueOnce(rows([]));
 
     const res = await request(app)
       .post("/api/parent/link-guardian")
@@ -283,7 +275,7 @@ describe("POST /api/parent/link-guardian", () => {
       .mockResolvedValueOnce(rows([{ id: 5, school_id: 10 }]))
       .mockResolvedValueOnce(rows([{ id: 900 }]))
       .mockResolvedValueOnce(rows([]))
-      .mockResolvedValueOnce([{}]);
+      .mockResolvedValueOnce(rows([]));
 
     const res = await request(app)
       .post("/api/parent/link-guardian")
@@ -335,7 +327,7 @@ describe("POST /api/parent/direct-debit/mandate", () => {
     mockQuery
       .mockResolvedValueOnce(rows([{ id: 5, school_id: 10 }]))
       .mockResolvedValueOnce(rows([])) // no existing mandate
-      .mockResolvedValueOnce([{}]); // INSERT
+      .mockResolvedValueOnce(rows([])); // INSERT
     mockIsFeatureEnabled.mockResolvedValueOnce(true);
     const res = await request(app).post("/api/parent/direct-debit/mandate").set("Cookie", parentCookie);
     expect(res.status).toBe(201);
@@ -349,27 +341,24 @@ describe("POST /api/parent/direct-debit/mandate", () => {
     mockQuery
       .mockResolvedValueOnce(rows([{ id: 5, school_id: 10 }]))
       .mockResolvedValueOnce(rows([{ status: "cancelled" }]))
-      .mockResolvedValueOnce([{}]); // UPDATE
+      .mockResolvedValueOnce(rows([])); // UPDATE
     mockIsFeatureEnabled.mockResolvedValueOnce(true);
     const res = await request(app).post("/api/parent/direct-debit/mandate").set("Cookie", parentCookie);
     expect(res.status).toBe(200);
-    expect(mockQuery).toHaveBeenLastCalledWith(
-      expect.stringContaining("SET status = 'active'"),
-      expect.anything()
-    );
+    expect(mockQuery).toHaveBeenLastCalledWith(expect.stringContaining("SET status = 'active'"), expect.anything());
   });
 });
 
 describe("POST /api/parent/direct-debit/mandate/cancel", () => {
   it("404s when there is no active mandate", async () => {
-    mockQuery.mockResolvedValueOnce(rows([{ id: 5, school_id: 10 }])).mockResolvedValueOnce([{ affectedRows: 0 }]);
+    mockQuery.mockResolvedValueOnce(rows([{ id: 5, school_id: 10 }])).mockResolvedValueOnce(rows([]));
     mockIsFeatureEnabled.mockResolvedValueOnce(true);
     const res = await request(app).post("/api/parent/direct-debit/mandate/cancel").set("Cookie", parentCookie);
     expect(res.status).toBe(404);
   });
 
   it("cancels an active mandate", async () => {
-    mockQuery.mockResolvedValueOnce(rows([{ id: 5, school_id: 10 }])).mockResolvedValueOnce([{ affectedRows: 1 }]);
+    mockQuery.mockResolvedValueOnce(rows([{ id: 5, school_id: 10 }])).mockResolvedValueOnce(rows([{ id: 1 }]));
     mockIsFeatureEnabled.mockResolvedValueOnce(true);
     const res = await request(app).post("/api/parent/direct-debit/mandate/cancel").set("Cookie", parentCookie);
     expect(res.status).toBe(200);

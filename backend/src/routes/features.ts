@@ -1,11 +1,9 @@
-import { Router } from "express";
-import { pool } from "../config/db";
+import { Hono } from "hono";
+import type { AppEnv } from "../types/env";
 import { authMiddleware } from "../middleware/auth";
-import { AuthenticatedRequest } from "../types/auth";
 import { resetExpiredFeatureFlags } from "../utils/featureFlags";
-import { asyncHandler } from "../utils/asyncHandler";
 
-const router = Router();
+const router = new Hono<AppEnv>();
 
 /* ============================================================
    GET STATUS OF ALL FEATURE FLAGS FOR THE CALLER'S SCHOOL
@@ -13,29 +11,31 @@ const router = Router();
    that school's explicit override where system_admin has set one,
    otherwise each flag's default_enabled.
    ============================================================ */
-router.get(
-  "/",
-  authMiddleware,
-  asyncHandler(async (req: AuthenticatedRequest, res) => {
-    await resetExpiredFeatureFlags();
+interface FlagStatusRow {
+  feature_key: string;
+  enabled: boolean;
+}
 
-    const [rows] = await pool.query(
-      `SELECT
-         ff.feature_key,
-         COALESCE(sff.enabled, ff.default_enabled) AS enabled
-       FROM feature_flags ff
-       LEFT JOIN school_feature_flags sff
-         ON sff.feature_flag_id = ff.id AND sff.school_id = ?`,
-      [req.user!.schoolId]
-    );
+router.get("/", authMiddleware, async c => {
+  const db = c.get("db");
+  await resetExpiredFeatureFlags(db);
 
-    const flags: Record<string, boolean> = {};
-    (rows as any[]).forEach(row => {
-      flags[row.feature_key] = !!row.enabled;
-    });
+  const { rows } = await db.query<FlagStatusRow>(
+    `SELECT
+       ff.feature_key,
+       COALESCE(sff.enabled, ff.default_enabled) AS enabled
+     FROM feature_flags ff
+     LEFT JOIN school_feature_flags sff
+       ON sff.feature_flag_id = ff.id AND sff.school_id = $1`,
+    [c.get("user")!.schoolId]
+  );
 
-    res.json({ flags });
-  })
-);
+  const flags: Record<string, boolean> = {};
+  rows.forEach(row => {
+    flags[row.feature_key] = !!row.enabled;
+  });
+
+  return c.json({ flags });
+});
 
 export default router;

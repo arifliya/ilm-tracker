@@ -12,6 +12,37 @@
 -- DROP TABLE/DROP COLUMN statements without a deliberate, reviewed
 -- reason. If a change needs undoing, write a new changeset that reverses
 -- it.
+--
+-- Postgres dialect (ported from the original MySQL baseline): status-like
+-- columns that were MySQL ENUM(...) are VARCHAR + a named CHECK
+-- constraint instead of a native Postgres ENUM type, since 002-direct-
+-- debit.sql widens student_fees.status in place afterwards and a CHECK
+-- constraint is far cheaper to alter (DROP/ADD CONSTRAINT) than a
+-- Postgres ENUM type (ALTER TYPE ... ADD VALUE, awkward under Liquibase's
+-- transaction wrapping).
+
+-- ============================
+-- SHARED updated_at TRIGGER FUNCTION
+-- ============================
+-- Postgres has no column-level equivalent of MySQL's
+-- "ON UPDATE CURRENT_TIMESTAMP" — a BEFORE UPDATE trigger is the standard
+-- substitute. Defined once, attached to every table that needs it
+-- (feature_flags, report_cards below).
+--
+-- Its own changeset with splitStatements:false: Liquibase's formatted-SQL
+-- parser splits a changeset's SQL into separate statements on every `;`,
+-- which would otherwise chop this function's body (semicolons inside the
+-- $$...$$ block) into several invalid fragments.
+
+--changeset ibrahim:001-baseline-schema-set-updated-at-fn splitStatements:false
+CREATE OR REPLACE FUNCTION set_updated_at() RETURNS TRIGGER AS $$
+BEGIN
+  NEW.updated_at = CURRENT_TIMESTAMP;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+--rollback DROP FUNCTION IF EXISTS set_updated_at();
 
 --changeset ibrahim:001-baseline-schema
 --comment: Baseline schema — schools, roles, users, parents, staff_details, classes, teacher_classes, students, student_classes, student_guardians, tasks, attendance, student_notes, feature_flags, school_feature_flags, notifications, notification_recipients, school_terms, report_cards, report_card_subjects, timetable_slots, school_events, fee_periods, student_fees, feature_flag_audit_log. Squashed from the original changesets 001 (baseline) through 014 (feature-flag-audit-log) — see git history for the incremental story (report cards, timetable, multi-guardian support, analytics, fee tracking, password management, flag audit log) if you need it.
@@ -21,7 +52,7 @@
 -- ============================
 
 CREATE TABLE schools (
-  id INT AUTO_INCREMENT PRIMARY KEY,
+  id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   name VARCHAR(255) NOT NULL,
   school_code VARCHAR(20) UNIQUE NOT NULL,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -32,7 +63,7 @@ CREATE TABLE schools (
 -- ============================
 
 CREATE TABLE roles (
-  id INT AUTO_INCREMENT PRIMARY KEY,
+  id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   name VARCHAR(50) UNIQUE NOT NULL
 );
 
@@ -53,7 +84,7 @@ INSERT INTO roles (name) VALUES
 -- column invalidates every token issued before that point.
 
 CREATE TABLE users (
-  id INT AUTO_INCREMENT PRIMARY KEY,
+  id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   username VARCHAR(255) UNIQUE NOT NULL,
   email VARCHAR(255) UNIQUE,
   password_hash VARCHAR(255) NOT NULL,
@@ -77,7 +108,7 @@ VALUES
 -- ============================
 
 CREATE TABLE parents (
-  id INT AUTO_INCREMENT PRIMARY KEY,
+  id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   user_id INT NOT NULL,
   school_id INT NOT NULL,
   first_name VARCHAR(100),
@@ -102,7 +133,7 @@ CREATE TABLE parents (
 -- ============================
 
 CREATE TABLE staff_details (
-  id INT AUTO_INCREMENT PRIMARY KEY,
+  id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   user_id INT NOT NULL,
   school_id INT NULL,
   first_name VARCHAR(100),
@@ -137,14 +168,14 @@ VALUES (
 -- both use a simple code like "7A" without colliding.
 
 CREATE TABLE classes (
-  id INT AUTO_INCREMENT PRIMARY KEY,
+  id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   school_id INT NOT NULL,
   class_name VARCHAR(255),
   class_code VARCHAR(30) NOT NULL,
   year_group VARCHAR(50),
   description TEXT NULL,
   FOREIGN KEY (school_id) REFERENCES schools(id),
-  UNIQUE KEY uq_school_class_code (school_id, class_code)
+  CONSTRAINT uq_school_class_code UNIQUE (school_id, class_code)
 );
 
 -- ============================
@@ -167,7 +198,7 @@ CREATE TABLE teacher_classes (
 -- rather than students belonging to a single mandatory parent.
 
 CREATE TABLE students (
-  id INT AUTO_INCREMENT PRIMARY KEY,
+  id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   school_id INT NOT NULL,
   user_id INT NULL UNIQUE,
   first_name VARCHAR(100),
@@ -184,7 +215,7 @@ CREATE TABLE students (
   guardian_code CHAR(8) NOT NULL,
   FOREIGN KEY (school_id) REFERENCES schools(id),
   FOREIGN KEY (user_id) REFERENCES users(id),
-  UNIQUE KEY uq_school_guardian_code (school_id, guardian_code)
+  CONSTRAINT uq_school_guardian_code UNIQUE (school_id, guardian_code)
 );
 
 -- ============================
@@ -210,7 +241,8 @@ CREATE TABLE student_classes (
 CREATE TABLE student_guardians (
   student_id INT NOT NULL,
   parent_id INT NOT NULL,
-  status ENUM('pending', 'approved') NOT NULL DEFAULT 'approved',
+  status VARCHAR(20) NOT NULL DEFAULT 'approved'
+    CONSTRAINT student_guardians_status_check CHECK (status IN ('pending', 'approved')),
   requested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   approved_at TIMESTAMP NULL,
   PRIMARY KEY (student_id, parent_id),
@@ -226,7 +258,7 @@ CREATE TABLE student_guardians (
 -- class_id so the existing teacher/class ownership checks keep working).
 
 CREATE TABLE tasks (
-  id INT AUTO_INCREMENT PRIMARY KEY,
+  id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   class_id INT NOT NULL,
   student_id INT NULL,
   title VARCHAR(255),
@@ -241,17 +273,18 @@ CREATE TABLE tasks (
 -- ============================
 
 CREATE TABLE IF NOT EXISTS attendance (
-  id INT AUTO_INCREMENT PRIMARY KEY,
+  id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   class_id INT NOT NULL,
   student_id INT NOT NULL,
   date DATE NOT NULL,
-  status ENUM('PRESENT', 'ABSENT') NOT NULL,
+  status VARCHAR(10) NOT NULL
+    CONSTRAINT attendance_status_check CHECK (status IN ('PRESENT', 'ABSENT')),
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   CONSTRAINT fk_attendance_class FOREIGN KEY (class_id)
     REFERENCES classes(id) ON DELETE CASCADE,
   CONSTRAINT fk_attendance_student FOREIGN KEY (student_id)
     REFERENCES students(id) ON DELETE CASCADE,
-  UNIQUE KEY uq_attendance (class_id, student_id, date)
+  CONSTRAINT uq_attendance UNIQUE (class_id, student_id, date)
 );
 
 -- ============================
@@ -263,7 +296,7 @@ CREATE TABLE IF NOT EXISTS attendance (
 -- themselves. Behind the "student_notes" feature flag.
 
 CREATE TABLE student_notes (
-  id INT AUTO_INCREMENT PRIMARY KEY,
+  id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   student_id INT NOT NULL,
   author_user_id INT NOT NULL,
   note TEXT NOT NULL,
@@ -281,15 +314,19 @@ CREATE TABLE student_notes (
 -- gets before system_admin has ever set an explicit override for it.
 
 CREATE TABLE IF NOT EXISTS feature_flags (
-  id INT AUTO_INCREMENT PRIMARY KEY,
+  id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   feature_key VARCHAR(100) UNIQUE NOT NULL,
   name VARCHAR(150) NOT NULL,
   description TEXT NULL,
   default_enabled BOOLEAN NOT NULL DEFAULT FALSE,
-  expires_at DATETIME NULL,
+  expires_at TIMESTAMP NULL,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TRIGGER feature_flags_set_updated_at
+  BEFORE UPDATE ON feature_flags
+  FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 INSERT INTO feature_flags (feature_key, name, description, default_enabled)
 VALUES
@@ -327,21 +364,22 @@ CREATE TABLE school_feature_flags (
 -- silently erases audit history.
 
 CREATE TABLE feature_flag_audit_log (
-  id INT AUTO_INCREMENT PRIMARY KEY,
+  id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   feature_flag_id INT NULL,
   feature_key VARCHAR(100) NOT NULL,
   school_id INT NULL,
   action VARCHAR(30) NOT NULL,
   actor_user_id INT NULL,
-  details JSON NULL,
+  details JSONB NULL,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (feature_flag_id) REFERENCES feature_flags(id) ON DELETE SET NULL,
   FOREIGN KEY (school_id) REFERENCES schools(id) ON DELETE SET NULL,
-  FOREIGN KEY (actor_user_id) REFERENCES users(id) ON DELETE SET NULL,
-  INDEX idx_ffal_feature_flag (feature_flag_id),
-  INDEX idx_ffal_school (school_id),
-  INDEX idx_ffal_created_at (created_at)
+  FOREIGN KEY (actor_user_id) REFERENCES users(id) ON DELETE SET NULL
 );
+
+CREATE INDEX idx_ffal_feature_flag ON feature_flag_audit_log (feature_flag_id);
+CREATE INDEX idx_ffal_school ON feature_flag_audit_log (school_id);
+CREATE INDEX idx_ffal_created_at ON feature_flag_audit_log (created_at);
 
 -- ============================
 -- NOTIFICATIONS
@@ -350,12 +388,18 @@ CREATE TABLE feature_flag_audit_log (
 -- owner/maintainer) in the sender's school. The recipient list is captured
 -- at send time in notification_recipients so it stays accurate even if
 -- school membership changes later.
+--
+-- id is GENERATED BY DEFAULT (not ALWAYS) as identity — mysql/seed.sql
+-- inserts explicit ids for its 3 demo notifications, which BY DEFAULT
+-- allows without needing OVERRIDING SYSTEM VALUE; the seed file resyncs
+-- the sequence afterward via ALTER SEQUENCE.
 
 CREATE TABLE notifications (
-  id INT AUTO_INCREMENT PRIMARY KEY,
+  id INT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
   school_id INT NOT NULL,
   sender_user_id INT NOT NULL,
-  audience ENUM('parent', 'staff') NOT NULL,
+  audience VARCHAR(10) NOT NULL
+    CONSTRAINT notifications_audience_check CHECK (audience IN ('parent', 'staff')),
   title VARCHAR(255) NOT NULL,
   message TEXT NOT NULL,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -379,14 +423,14 @@ CREATE TABLE notification_recipients (
 -- (e.g. "Term 1 2025-26"). Managed exclusively by admin, per school.
 
 CREATE TABLE school_terms (
-  id INT AUTO_INCREMENT PRIMARY KEY,
+  id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   school_id INT NOT NULL,
   name VARCHAR(100) NOT NULL,
   start_date DATE NOT NULL,
   end_date DATE NOT NULL,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (school_id) REFERENCES schools(id) ON DELETE CASCADE,
-  UNIQUE KEY uq_school_term_name (school_id, name)
+  CONSTRAINT uq_school_term_name UNIQUE (school_id, name)
 );
 
 -- ============================
@@ -396,24 +440,28 @@ CREATE TABLE school_terms (
 -- even though it's not currently surfaced in the API response.
 
 CREATE TABLE report_cards (
-  id INT AUTO_INCREMENT PRIMARY KEY,
+  id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   student_id INT NOT NULL,
   term_id INT NOT NULL,
   created_by_user_id INT NOT NULL,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE CASCADE,
   FOREIGN KEY (term_id) REFERENCES school_terms(id) ON DELETE CASCADE,
   FOREIGN KEY (created_by_user_id) REFERENCES users(id),
-  UNIQUE KEY uq_report_card_student_term (student_id, term_id)
+  CONSTRAINT uq_report_card_student_term UNIQUE (student_id, term_id)
 );
+
+CREATE TRIGGER report_cards_set_updated_at
+  BEFORE UPDATE ON report_cards
+  FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 -- ============================
 -- REPORT CARD SUBJECTS
 -- ============================
 
 CREATE TABLE report_card_subjects (
-  id INT AUTO_INCREMENT PRIMARY KEY,
+  id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   report_card_id INT NOT NULL,
   subject_name VARCHAR(100) NOT NULL,
   grade VARCHAR(20) NOT NULL,
@@ -430,7 +478,7 @@ CREATE TABLE report_card_subjects (
 -- isn't part of the natural key — slot_date alone determines it.
 
 CREATE TABLE timetable_slots (
-  id INT AUTO_INCREMENT PRIMARY KEY,
+  id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   class_id INT NOT NULL,
   term_id INT NULL,
   slot_date DATE NOT NULL,
@@ -442,7 +490,7 @@ CREATE TABLE timetable_slots (
   FOREIGN KEY (class_id) REFERENCES classes(id) ON DELETE CASCADE,
   FOREIGN KEY (teacher_id) REFERENCES users(id) ON DELETE SET NULL,
   CONSTRAINT fk_timetable_slots_term FOREIGN KEY (term_id) REFERENCES school_terms(id) ON DELETE CASCADE,
-  UNIQUE KEY uq_timetable_slot (class_id, slot_date, start_time)
+  CONSTRAINT uq_timetable_slot UNIQUE (class_id, slot_date, start_time)
 );
 
 -- ============================
@@ -452,7 +500,7 @@ CREATE TABLE timetable_slots (
 -- start_time/end_time are optional so an event can be all-day.
 
 CREATE TABLE school_events (
-  id INT AUTO_INCREMENT PRIMARY KEY,
+  id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   school_id INT NOT NULL,
   title VARCHAR(255) NOT NULL,
   description TEXT NULL,
@@ -472,14 +520,14 @@ CREATE TABLE school_events (
 -- school_terms — explicit rows rather than auto-derived calendar months.
 
 CREATE TABLE fee_periods (
-  id INT AUTO_INCREMENT PRIMARY KEY,
+  id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   school_id INT NOT NULL,
   name VARCHAR(100) NOT NULL,
   start_date DATE NOT NULL,
   end_date DATE NOT NULL,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (school_id) REFERENCES schools(id) ON DELETE CASCADE,
-  UNIQUE KEY uq_fee_period_name (school_id, name)
+  CONSTRAINT uq_fee_period_name UNIQUE (school_id, name)
 );
 
 -- ============================
@@ -491,46 +539,47 @@ CREATE TABLE fee_periods (
 -- failure_reason and widens status on top of this.)
 
 CREATE TABLE student_fees (
-  id INT AUTO_INCREMENT PRIMARY KEY,
+  id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   student_id INT NOT NULL,
   fee_period_id INT NOT NULL,
   amount DECIMAL(10,2) NOT NULL,
-  status ENUM('unpaid', 'paid') NOT NULL DEFAULT 'unpaid',
+  status VARCHAR(20) NOT NULL DEFAULT 'unpaid'
+    CONSTRAINT student_fees_status_check CHECK (status IN ('unpaid', 'paid')),
   paid_at TIMESTAMP NULL,
   marked_paid_by_user_id INT NULL,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE CASCADE,
   FOREIGN KEY (fee_period_id) REFERENCES fee_periods(id) ON DELETE CASCADE,
   FOREIGN KEY (marked_paid_by_user_id) REFERENCES users(id),
-  UNIQUE KEY uq_student_fee_period (student_id, fee_period_id)
+  CONSTRAINT uq_student_fee_period UNIQUE (student_id, fee_period_id)
 );
 
 -- ============================
 -- INDEXES
 -- ============================
 
-ALTER TABLE tasks ADD INDEX idx_tasks_class (class_id);
-ALTER TABLE tasks ADD INDEX idx_tasks_student (student_id);
-ALTER TABLE student_notes ADD INDEX idx_student_notes_student (student_id);
-ALTER TABLE users ADD INDEX idx_users_school (school_id);
-ALTER TABLE classes ADD INDEX idx_classes_school (school_id);
-ALTER TABLE parents ADD INDEX idx_parents_school (school_id);
-ALTER TABLE staff_details ADD INDEX idx_staff_details_school (school_id);
-ALTER TABLE students ADD INDEX idx_students_school (school_id);
-ALTER TABLE notifications ADD INDEX idx_notifications_school (school_id);
-ALTER TABLE notification_recipients ADD INDEX idx_notification_recipients_user (user_id);
-ALTER TABLE student_guardians ADD INDEX idx_student_guardians_parent (parent_id);
-ALTER TABLE school_terms ADD INDEX idx_school_terms_school (school_id);
-ALTER TABLE report_cards ADD INDEX idx_report_cards_student (student_id);
-ALTER TABLE report_cards ADD INDEX idx_report_cards_term (term_id);
-ALTER TABLE report_card_subjects ADD INDEX idx_report_card_subjects_card (report_card_id);
-ALTER TABLE timetable_slots ADD INDEX idx_timetable_slots_class (class_id);
-ALTER TABLE timetable_slots ADD INDEX idx_timetable_slots_teacher (teacher_id);
-ALTER TABLE timetable_slots ADD INDEX idx_timetable_slots_term (term_id);
-ALTER TABLE school_events ADD INDEX idx_school_events_school (school_id);
-ALTER TABLE school_events ADD INDEX idx_school_events_date (event_date);
-ALTER TABLE fee_periods ADD INDEX idx_fee_periods_school (school_id);
-ALTER TABLE student_fees ADD INDEX idx_student_fees_period (fee_period_id);
-ALTER TABLE student_fees ADD INDEX idx_student_fees_student (student_id);
+CREATE INDEX idx_tasks_class ON tasks (class_id);
+CREATE INDEX idx_tasks_student ON tasks (student_id);
+CREATE INDEX idx_student_notes_student ON student_notes (student_id);
+CREATE INDEX idx_users_school ON users (school_id);
+CREATE INDEX idx_classes_school ON classes (school_id);
+CREATE INDEX idx_parents_school ON parents (school_id);
+CREATE INDEX idx_staff_details_school ON staff_details (school_id);
+CREATE INDEX idx_students_school ON students (school_id);
+CREATE INDEX idx_notifications_school ON notifications (school_id);
+CREATE INDEX idx_notification_recipients_user ON notification_recipients (user_id);
+CREATE INDEX idx_student_guardians_parent ON student_guardians (parent_id);
+CREATE INDEX idx_school_terms_school ON school_terms (school_id);
+CREATE INDEX idx_report_cards_student ON report_cards (student_id);
+CREATE INDEX idx_report_cards_term ON report_cards (term_id);
+CREATE INDEX idx_report_card_subjects_card ON report_card_subjects (report_card_id);
+CREATE INDEX idx_timetable_slots_class ON timetable_slots (class_id);
+CREATE INDEX idx_timetable_slots_teacher ON timetable_slots (teacher_id);
+CREATE INDEX idx_timetable_slots_term ON timetable_slots (term_id);
+CREATE INDEX idx_school_events_school ON school_events (school_id);
+CREATE INDEX idx_school_events_date ON school_events (event_date);
+CREATE INDEX idx_fee_periods_school ON fee_periods (school_id);
+CREATE INDEX idx_student_fees_period ON student_fees (fee_period_id);
+CREATE INDEX idx_student_fees_student ON student_fees (student_id);
 
---rollback DROP TABLE IF EXISTS student_fees, fee_periods, school_events, timetable_slots, report_card_subjects, report_cards, school_terms, notification_recipients, notifications, feature_flag_audit_log, school_feature_flags, feature_flags, student_notes, attendance, tasks, student_guardians, student_classes, students, teacher_classes, classes, staff_details, parents, users, roles, schools;
+--rollback DROP TABLE IF EXISTS student_fees, fee_periods, school_events, timetable_slots, report_card_subjects, report_cards, school_terms, notification_recipients, notifications, feature_flag_audit_log, school_feature_flags, feature_flags, student_notes, attendance, tasks, student_guardians, student_classes, students, teacher_classes, classes, staff_details, parents, users, roles, schools CASCADE;

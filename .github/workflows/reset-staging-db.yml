@@ -1,0 +1,101 @@
+name: Reset Staging Database
+
+# Manual-only, and deliberately has no environment choice the way
+# e2e-remote.yml has — this always targets the STAGING Neon branch via
+# STAGING_DATABASE_URL and nothing else, so there is no way to point this
+# at production from this workflow.
+#
+# Fully destructive: drops every table in the staging database (including
+# Liquibase's own tracking tables), rebuilds the schema from scratch by
+# replaying every changeset in changelog-master.xml, then loads
+# mysql/seed.sql. Use this when staging's data needs to be thrown away and
+# started fresh — e.g. it was forked from real production data and needs
+# the demo/test accounts instead, or a `seed: true` run in staging.yml
+# left duplicate rows behind (mysql/seed.sql has no ON CONFLICT guards, so
+# it can only ever be loaded once per reset).
+#
+# Requires typing an exact confirmation phrase — a bare workflow_dispatch
+# button is too easy to fire by mistake for something this destructive.
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type exactly "RESET STAGING" to confirm — this drops and rebuilds the ENTIRE staging database'
+        required: true
+        type: string
+
+concurrency:
+  group: reset-staging-db
+  cancel-in-progress: false
+
+jobs:
+  reset-staging-database:
+    name: Drop, rebuild schema, and reseed staging
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check confirmation phrase
+        if: ${{ inputs.confirm != 'RESET STAGING' }}
+        run: |
+          echo "Confirmation phrase didn't match — refusing to reset staging. Type exactly: RESET STAGING" >&2
+          exit 1
+
+      - uses: actions/checkout@v7
+
+      # Same parse/mask pattern as staging.yml's migrate-staging-database
+      # job — Liquibase needs the connection broken into JDBC pieces,
+      # psql (used directly below) is happy with the raw URL as-is.
+      - name: Parse STAGING_DATABASE_URL into JDBC pieces
+        id: dburl
+        working-directory: liquibase
+        run: |
+          node -e '
+            const u = new URL(process.env.DATABASE_URL);
+            const host = u.hostname + (u.port ? ":" + u.port : "");
+            const db = u.pathname.replace(/^\//, "");
+            const params = new URLSearchParams(u.search);
+            if (!params.has("sslmode")) params.set("sslmode", "require");
+            console.log(`jdbc_url=jdbc:postgresql://${host}/${db}?${params.toString()}`);
+            console.log(`username=${decodeURIComponent(u.username)}`);
+          ' >> "$GITHUB_OUTPUT"
+          # Password is written separately so it never appears in this
+          # step's own stdout/logs, only piped straight into GITHUB_OUTPUT.
+          node -e 'console.log(decodeURIComponent(new URL(process.env.DATABASE_URL).password))' | \
+            (read -r pw; echo "password=$pw" >> "$GITHUB_OUTPUT")
+        env:
+          DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
+
+      - name: Mask parsed credentials in logs
+        run: |
+          echo "::add-mask::${{ steps.dburl.outputs.username }}"
+          echo "::add-mask::${{ steps.dburl.outputs.password }}"
+
+      # Dropping and recreating the public schema wipes every table,
+      # including databasechangelog/databasechangeloglock — Liquibase
+      # will recreate those itself on the next `update`, same as it would
+      # against a genuinely empty database.
+      - name: Drop every table
+        run: |
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;"
+          echo "Dropped every table in staging." >> "$GITHUB_STEP_SUMMARY"
+        env:
+          DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
+
+      - name: Rebuild schema from every changeset
+        working-directory: liquibase
+        run: |
+          docker run --rm \
+            -v "$(pwd)/changelog:/liquibase/changelog" \
+            -v "$(pwd)/drivers:/liquibase/lib" \
+            -e LIQUIBASE_COMMAND_URL="${{ steps.dburl.outputs.jdbc_url }}" \
+            -e LIQUIBASE_COMMAND_USERNAME="${{ steps.dburl.outputs.username }}" \
+            -e LIQUIBASE_COMMAND_PASSWORD="${{ steps.dburl.outputs.password }}" \
+            -e LIQUIBASE_COMMAND_CHANGELOG_FILE="changelog/changelog-master.xml" \
+            liquibase/liquibase:4.29 update
+          echo "Rebuilt schema from every changeset." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Load mysql/seed.sql demo/test data
+        run: |
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f mysql/seed.sql
+          echo "Loaded mysql/seed.sql into staging." >> "$GITHUB_STEP_SUMMARY"
+        env:
+          DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}

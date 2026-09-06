@@ -1,5 +1,9 @@
 import crypto from "crypto";
-import { env } from "../config/env";
+// Imported explicitly (rather than relying on the ambient global `Buffer`)
+// because @cloudflare/workers-types and @types/node both declare a global
+// `Buffer`, and letting TS pick between them loses Node's `toString(encoding)`
+// overload — importing the value/type directly from "buffer" sidesteps it.
+import { Buffer } from "buffer";
 
 /* ============================================================
    DIRECT DEBIT PROVIDER — STUB IMPLEMENTATION
@@ -34,8 +38,8 @@ export interface ProviderPayment {
 // 'pending' state on the schema even though this stub never uses it.
 export const createMandate = async (parentId: number): Promise<ProviderMandate> => {
   return {
-    providerCustomerId: `stub_cust_${parentId}_${crypto.randomBytes(4).toString("hex")}`,
-    providerMandateId: `stub_mandate_${crypto.randomBytes(6).toString("hex")}`
+    providerCustomerId: `stub_cust_${parentId}_${Buffer.from(crypto.randomBytes(4)).toString("hex")}`,
+    providerMandateId: `stub_mandate_${Buffer.from(crypto.randomBytes(6)).toString("hex")}`
   };
 };
 
@@ -49,7 +53,7 @@ export const createPayment = async (
   feeId: number
 ): Promise<ProviderPayment> => {
   return {
-    providerPaymentId: `stub_pay_${feeId}_${crypto.randomBytes(6).toString("hex")}`
+    providerPaymentId: `stub_pay_${feeId}_${Buffer.from(crypto.randomBytes(6)).toString("hex")}`
   };
 };
 
@@ -58,11 +62,15 @@ export const createPayment = async (
 // use for webhook signatures, so the real webhook route logic doesn't
 // change when the stub is swapped out, only this verification function
 // does.
-export const verifyWebhookSignature = (rawBody: string, signatureHeader: string | undefined): boolean => {
+export const verifyWebhookSignature = (
+  rawBody: string,
+  signatureHeader: string | undefined,
+  webhookSecret: string
+): boolean => {
   if (!signatureHeader) return false;
 
   const expected = crypto
-    .createHmac("sha256", env.DIRECT_DEBIT_WEBHOOK_SECRET)
+    .createHmac("sha256", webhookSecret)
     .update(rawBody)
     .digest("hex");
 

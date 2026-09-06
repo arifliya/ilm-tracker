@@ -31,7 +31,7 @@ describe("AppRouter", () => {
 
   it("renders Home at / with the footer visible", async () => {
     renderAt("/");
-    expect(await screen.findByRole("heading", { name: "ilm School Portal" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Ilm Tracker" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Privacy Policy" })).toBeInTheDocument();
   });
 
@@ -71,6 +71,6 @@ describe("AppRouter", () => {
 
   it("redirects an unknown path back to Home", async () => {
     renderAt("/this-route-does-not-exist");
-    expect(await screen.findByRole("heading", { name: "ilm School Portal" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Ilm Tracker" })).toBeInTheDocument();
   });
 });

@@ -1,7 +1,7 @@
 # E2E tests
 
 Browser-level tests that exercise a real login and role-based dashboard
-routing against a real running stack (real backend, real MySQL) — unlike
+routing against a real running stack (real backend, real Postgres) — unlike
 the `backend`/`frontend` unit suites, which run against mocked DB/API
 calls. This is a standalone npm package: its own `package.json`/lockfile,
 not linked to `backend`/`frontend` via workspaces, since these tests only
@@ -13,7 +13,13 @@ ever talk to the app over HTTP/browser and share no code with either.
 cd e2e
 npm install
 npx playwright install --with-deps chromium
+cp .env.example .env
 ```
+
+The last step matters even for a routine local run: `E2E_SEED_PASSWORD`
+has no hardcoded fallback in the test source (`helpers/auth.ts` throws a
+clear error if it's unset), so `e2e/.env` is required, not optional — see
+`.env.example` for what each value does.
 
 ## Running
 
@@ -23,23 +29,58 @@ From the repo root:
 ./scripts/run-e2e.sh
 ```
 
-This spins up an isolated Compose project (`-p ilm-e2e`, its own volume,
-separate from your regular dev stack's database), seeds it with
-`mysql/seed.sql`, runs the suite, and tears everything down again on exit
-— pass or fail.
+This is a single, self-contained command — it spins up an isolated
+Compose project (`-p ilm-e2e`, its own Postgres volume, separate from your
+regular dev stack's database), seeds it with `mysql/seed.sql`, starts
+`wrangler dev` and `vite dev` itself in the background, runs the suite,
+and tears everything down again on exit — pass or fail. Nothing needs to
+be started by hand in another terminal first.
 
 Requirements:
-- `backend/.env` must exist (see the root README's "Running it locally").
-- Your regular dev stack must be **fully down**
-  (`docker compose down`, not just stopped) — `docker-compose.yml`'s
-  services have fixed container names, so a stopped-but-not-removed
-  container still reserves its name and will collide with the E2E run.
+- `e2e/.env` must exist (see Setup above) — needed for `E2E_SEED_PASSWORD`
+  regardless of local vs. remote.
+- Local run only, not needed when pointing at a remote environment (see
+  below):
+  - `.env` must exist at the repo root (see the root README's "Running it
+    locally").
+  - `backend/.dev.vars` must exist (same section) — needed for `wrangler
+    dev`, which this script starts for you.
+  - Your regular dev stack must be **fully down**: `docker compose down`
+    (not just stopped) for the same fixed-container-name reason as
+    before, and no `wrangler dev`/`vite dev` already running in another
+    terminal, since this script binds the same ports (8787/5173) they use.
 
-Tests run in a **visible (headed) browser window, one at a time** — that's
-deliberate: the point of headed mode here is to actually watch a journey
-happen, which several parallel windows would work against. Expect a real
-Chrome window to open and drive itself through each journey; don't
-interact with it mid-run.
+### Running against a remote environment (staging)
+
+By default the suite runs against the local stack it starts itself. To
+point it at an already-running remote environment instead — e.g. staging —
+set `E2E_BASE_URL` in `e2e/.env` to that environment's URL. When set,
+`./scripts/run-e2e.sh` skips Docker/`wrangler dev`/`vite dev` entirely and
+runs the suite straight against that URL.
+
+The target environment must already be seeded with the same accounts
+`mysql/seed.sql` creates — this script has no way to seed a remote
+database for you. Every seeded account shares one password
+(`helpers/auth.ts`'s `SEED_PASSWORD` — see the comment at the top of
+`mysql/seed.sql` for the actual value, deliberately not repeated in
+`.env.example` too); if the remote target's seed data uses a different
+password, change `E2E_SEED_PASSWORD` in `e2e/.env` alongside
+`E2E_BASE_URL` to match it. **Never** point this at a live/production
+URL: every journey creates, edits, or deletes real-looking data, and
+running it against production would corrupt real records — see the
+warning in `.env.example`.
+
+In CI, `.github/workflows/e2e-remote.yml` runs this same suite against
+staging on demand (manual `workflow_dispatch`, not on every push), writing
+`e2e/.env` itself from GitHub secrets rather than anyone setting it by
+hand.
+
+Tests run in a **visible (headed) browser window, one at a time** locally
+— that's deliberate: the point of headed mode here is to actually watch a
+journey happen, which several parallel windows would work against. Expect
+a real Chrome window to open and drive itself through each journey; don't
+interact with it mid-run. In CI (`CI=true`), it runs headless instead —
+same serial execution, no visible window (see `playwright.config.ts`).
 
 To inspect a run afterward: `npm --prefix e2e run report` opens the last
 HTML report (screenshots/traces on failure).
@@ -148,12 +189,8 @@ guarding against exactly this.
 
 ## Scope and status
 
-Local/manual only for now — **not** wired into `.github/workflows/ci.yml`.
-E2E suites tend to start flaky; the plan is to prove this out locally
-first and add it to CI once there's real confidence in it.
-
-This targets the current branch's stack (Express backend + nginx-served
-frontend via `docker-compose.yml`). If the parked
-`feat/cloudflare-development` migration lands, `scripts/run-e2e.sh`'s
-stack-startup step will need updating — that Compose file no longer runs
-`backend`/`frontend` services.
+Runs automatically on every push via `.github/workflows/ci.yml`'s `e2e`
+job, against a local stack it builds from ephemeral fixtures — same as a
+local `./scripts/run-e2e.sh` run. `.github/workflows/e2e-remote.yml` is
+separate and manual-only (`workflow_dispatch`), for running against
+staging on demand rather than on every push.

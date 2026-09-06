@@ -4,18 +4,23 @@ jest.mock("../../utils/featureFlags", () => ({
   isFeatureEnabled: jest.fn()
 }));
 
-import request from "supertest";
-import { app } from "../../app";
-import { pool } from "../../config/db";
+import app from "../../app";
 import { rows } from "../helpers/db";
 import { authCookie } from "../helpers/auth";
 import { isFeatureEnabled } from "../../utils/featureFlags";
+import { request } from "../helpers/request";
 
-const mockQuery = pool.query as jest.Mock;
+const { mockDb } = jest.requireMock<typeof import("../../config/__mocks__/db")>("../../config/db");
+const mockQuery = mockDb.query as jest.Mock;
 const mockIsFeatureEnabled = isFeatureEnabled as jest.Mock;
 
-const sysAdminCookie = authCookie({ userId: 1, role: "system_admin", schoolId: null });
-const ownerCookie = authCookie({ userId: 2, role: "owner", schoolId: 10 });
+let sysAdminCookie: string;
+let ownerCookie: string;
+
+beforeAll(async () => {
+  sysAdminCookie = await authCookie({ userId: 1, role: "system_admin", schoolId: null });
+  ownerCookie = await authCookie({ userId: 2, role: "owner", schoolId: 10 });
+});
 
 describe("GET /api/system-admin/schools", () => {
   it("403s for a non-system_admin", async () => {
@@ -33,16 +38,13 @@ describe("GET /api/system-admin/schools", () => {
 
 describe("POST /api/system-admin/schools", () => {
   it("400s when name is missing", async () => {
-    const res = await request(app)
-      .post("/api/system-admin/schools")
-      .set("Cookie", sysAdminCookie)
-      .send({});
+    const res = await request(app).post("/api/system-admin/schools").set("Cookie", sysAdminCookie).send({});
     expect(res.status).toBe(400);
   });
 
   it("creates a school with a freshly generated unique code", async () => {
     mockQuery.mockResolvedValueOnce(rows([])); // first candidate is unused
-    mockQuery.mockResolvedValueOnce(rows({})); // insert
+    mockQuery.mockResolvedValueOnce(rows([])); // insert
 
     const res = await request(app)
       .post("/api/system-admin/schools")
@@ -57,7 +59,7 @@ describe("POST /api/system-admin/schools", () => {
     mockQuery
       .mockResolvedValueOnce(rows([{ id: 1 }])) // first candidate taken
       .mockResolvedValueOnce(rows([])) // second candidate free
-      .mockResolvedValueOnce(rows({})); // insert
+      .mockResolvedValueOnce(rows([])); // insert
 
     const res = await request(app)
       .post("/api/system-admin/schools")
@@ -121,8 +123,8 @@ describe("POST /api/system-admin/feature-flags", () => {
   it("creates a feature flag and normalizes the expiry datetime", async () => {
     mockQuery
       .mockResolvedValueOnce(rows([])) // key uniqueness check
-      .mockResolvedValueOnce(rows({ insertId: 5 })) // insert
-      .mockResolvedValueOnce(rows({})); // audit log insert
+      .mockResolvedValueOnce(rows([{ id: 5 }])) // insert
+      .mockResolvedValueOnce(rows([])); // audit log insert
 
     const res = await request(app)
       .post("/api/system-admin/feature-flags")
@@ -146,8 +148,8 @@ describe("PUT /api/system-admin/feature-flags/:id/schools/:schoolId", () => {
   it("sets the per-school override", async () => {
     mockQuery
       .mockResolvedValueOnce(rows([{ feature_key: "notifications" }])) // flag lookup
-      .mockResolvedValueOnce(rows({})) // upsert
-      .mockResolvedValueOnce(rows({})); // audit log insert
+      .mockResolvedValueOnce(rows([])) // upsert
+      .mockResolvedValueOnce(rows([])); // audit log insert
     const res = await request(app)
       .put("/api/system-admin/feature-flags/1/schools/2")
       .set("Cookie", sysAdminCookie)
@@ -167,7 +169,7 @@ describe("PUT /api/system-admin/feature-flags/:id/schools/:schoolId", () => {
   it("404s when the school doesn't exist (FK violation on insert)", async () => {
     mockQuery
       .mockResolvedValueOnce(rows([{ feature_key: "notifications" }])) // flag lookup
-      .mockRejectedValueOnce({ code: "ER_NO_REFERENCED_ROW_2" }); // upsert fails on bad schoolId
+      .mockRejectedValueOnce({ code: "23503" }); // upsert fails on bad schoolId
     const res = await request(app)
       .put("/api/system-admin/feature-flags/1/schools/999")
       .set("Cookie", sysAdminCookie)
@@ -180,8 +182,8 @@ describe("DELETE /api/system-admin/feature-flags/:id/schools/:schoolId", () => {
   it("clears the override", async () => {
     mockQuery
       .mockResolvedValueOnce(rows([{ feature_key: "notifications" }])) // flag lookup
-      .mockResolvedValueOnce(rows({ affectedRows: 1 })) // delete
-      .mockResolvedValueOnce(rows({})); // audit log insert
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 }) // delete
+      .mockResolvedValueOnce(rows([])); // audit log insert
     const res = await request(app)
       .delete("/api/system-admin/feature-flags/1/schools/2")
       .set("Cookie", sysAdminCookie);
@@ -191,7 +193,7 @@ describe("DELETE /api/system-admin/feature-flags/:id/schools/:schoolId", () => {
   it("skips the audit log when nothing was actually cleared", async () => {
     mockQuery
       .mockResolvedValueOnce(rows([{ feature_key: "notifications" }])) // flag lookup
-      .mockResolvedValueOnce(rows({ affectedRows: 0 })); // delete, no override existed
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 }); // delete, no override existed
     const res = await request(app)
       .delete("/api/system-admin/feature-flags/1/schools/2")
       .set("Cookie", sysAdminCookie);
@@ -202,10 +204,7 @@ describe("DELETE /api/system-admin/feature-flags/:id/schools/:schoolId", () => {
 
 describe("PUT /api/system-admin/feature-flags/:id", () => {
   it("400s when name is missing", async () => {
-    const res = await request(app)
-      .put("/api/system-admin/feature-flags/1")
-      .set("Cookie", sysAdminCookie)
-      .send({});
+    const res = await request(app).put("/api/system-admin/feature-flags/1").set("Cookie", sysAdminCookie).send({});
     expect(res.status).toBe(400);
   });
 
@@ -221,8 +220,8 @@ describe("PUT /api/system-admin/feature-flags/:id", () => {
   it("updates the flag metadata", async () => {
     mockQuery
       .mockResolvedValueOnce(rows([{ feature_key: "notifications" }])) // flag lookup
-      .mockResolvedValueOnce(rows({})) // update
-      .mockResolvedValueOnce(rows({})); // audit log insert
+      .mockResolvedValueOnce(rows([])) // update
+      .mockResolvedValueOnce(rows([])); // audit log insert
     const res = await request(app)
       .put("/api/system-admin/feature-flags/1")
       .set("Cookie", sysAdminCookie)
@@ -241,8 +240,8 @@ describe("DELETE /api/system-admin/feature-flags/:id", () => {
   it("deletes the flag", async () => {
     mockQuery
       .mockResolvedValueOnce(rows([{ feature_key: "notifications" }])) // flag lookup
-      .mockResolvedValueOnce(rows({ affectedRows: 1 })) // delete
-      .mockResolvedValueOnce(rows({})); // audit log insert
+      .mockResolvedValueOnce(rows([])) // delete
+      .mockResolvedValueOnce(rows([])); // audit log insert
     const res = await request(app).delete("/api/system-admin/feature-flags/1").set("Cookie", sysAdminCookie);
     expect(res.status).toBe(200);
   });
@@ -312,7 +311,7 @@ describe("POST /api/system-admin/owners/:id/reset-password", () => {
   it("resets the owner's password and returns a one-time temporary password", async () => {
     mockQuery
       .mockResolvedValueOnce(rows([{ school_id: 10, role_name: "owner" }])) // user lookup
-      .mockResolvedValueOnce(rows({})); // update
+      .mockResolvedValueOnce(rows([])); // update
     mockIsFeatureEnabled.mockResolvedValueOnce(true);
 
     const res = await request(app)

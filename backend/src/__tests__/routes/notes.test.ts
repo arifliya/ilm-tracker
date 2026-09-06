@@ -3,20 +3,27 @@ jest.mock("../../utils/featureFlags", () => ({
   isFeatureEnabled: jest.fn()
 }));
 
-import request from "supertest";
-import { app } from "../../app";
-import { pool } from "../../config/db";
+import app from "../../app";
 import { rows } from "../helpers/db";
 import { authCookie } from "../helpers/auth";
+import { request } from "../helpers/request";
 import { isFeatureEnabled } from "../../utils/featureFlags";
 
-const mockQuery = pool.query as jest.Mock;
+const { mockDb } = jest.requireMock<typeof import("../../config/__mocks__/db")>("../../config/db");
+const mockQuery = mockDb.query as jest.Mock;
 const mockIsFeatureEnabled = isFeatureEnabled as jest.Mock;
 
-const teacherCookie = authCookie({ userId: 1, role: "teacher", schoolId: 10 });
-const adminCookie = authCookie({ userId: 2, role: "admin", schoolId: 10 });
-const parentCookie = authCookie({ userId: 3, role: "parent", schoolId: 10 });
-const studentCookie = authCookie({ userId: 4, role: "student", schoolId: 10 });
+let teacherCookie: string;
+let adminCookie: string;
+let parentCookie: string;
+let studentCookie: string;
+
+beforeAll(async () => {
+  teacherCookie = await authCookie({ userId: 1, role: "teacher", schoolId: 10 });
+  adminCookie = await authCookie({ userId: 2, role: "admin", schoolId: 10 });
+  parentCookie = await authCookie({ userId: 3, role: "parent", schoolId: 10 });
+  studentCookie = await authCookie({ userId: 4, role: "student", schoolId: 10 });
+});
 
 describe("GET /api/notes/students/:studentId", () => {
   it("404s when the student does not exist", async () => {
@@ -145,7 +152,7 @@ describe("POST /api/notes/students/:studentId", () => {
     mockQuery
       .mockResolvedValueOnce(rows([{ id: 1, school_id: 10, parent_id: 5 }]))
       .mockResolvedValueOnce(rows([{ x: 1 }])) // teachesStudent -> true
-      .mockResolvedValueOnce(rows({}));
+      .mockResolvedValueOnce(rows([]));
     mockIsFeatureEnabled.mockResolvedValueOnce(true);
 
     const res = await request(app)
@@ -159,7 +166,7 @@ describe("POST /api/notes/students/:studentId", () => {
   it("adds the note for non-teacher staff without a class-ownership check", async () => {
     mockQuery
       .mockResolvedValueOnce(rows([{ id: 1, school_id: 10, parent_id: 5 }]))
-      .mockResolvedValueOnce(rows({}));
+      .mockResolvedValueOnce(rows([]));
     mockIsFeatureEnabled.mockResolvedValueOnce(true);
 
     const res = await request(app)

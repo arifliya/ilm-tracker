@@ -3,18 +3,23 @@ jest.mock("../../utils/featureFlags", () => ({
   isFeatureEnabled: jest.fn()
 }));
 
-import request from "supertest";
-import { app } from "../../app";
-import { pool } from "../../config/db";
+import app from "../../app";
 import { rows } from "../helpers/db";
 import { authCookie } from "../helpers/auth";
+import { request } from "../helpers/request";
 import { isFeatureEnabled } from "../../utils/featureFlags";
 
-const mockQuery = pool.query as jest.Mock;
+const { mockDb } = jest.requireMock<typeof import("../../config/__mocks__/db")>("../../config/db");
+const mockQuery = mockDb.query as jest.Mock;
 const mockIsFeatureEnabled = isFeatureEnabled as jest.Mock;
 
-const teacherCookie = authCookie({ userId: 1, role: "teacher", schoolId: 10 });
-const parentCookie = authCookie({ userId: 2, role: "parent", schoolId: 10 });
+let teacherCookie: string;
+let parentCookie: string;
+
+beforeAll(async () => {
+  teacherCookie = await authCookie({ userId: 1, role: "teacher", schoolId: 10 });
+  parentCookie = await authCookie({ userId: 2, role: "parent", schoolId: 10 });
+});
 
 describe("GET /api/teacher/classes", () => {
   it("403s for a non-teacher role", async () => {
@@ -69,8 +74,8 @@ describe("GET /api/teacher/attendance/report", () => {
       .set("Cookie", teacherCookie);
 
     expect(res.status).toBe(200);
-    expect(res.headers["content-type"]).toMatch(/text\/csv/);
-    expect(res.text).toContain("Sam,Doe,7A,Absent");
+    expect(res.headers.get("content-type")).toMatch(/text\/csv/);
+    expect(res.body).toContain("Sam,Doe,7A,Absent");
   });
 });
 
@@ -153,7 +158,7 @@ describe("POST /api/teacher/attendance/mark", () => {
   });
 
   it("marks attendance, normalizing status to uppercase", async () => {
-    mockQuery.mockResolvedValueOnce(rows([{ x: 1 }])).mockResolvedValueOnce(rows({}));
+    mockQuery.mockResolvedValueOnce(rows([{ x: 1 }])).mockResolvedValueOnce(rows([]));
 
     const res = await request(app)
       .post("/api/teacher/attendance/mark")
@@ -176,7 +181,7 @@ describe("POST /api/teacher/tasks/create", () => {
   });
 
   it("creates a class-wide task", async () => {
-    mockQuery.mockResolvedValueOnce(rows([{ x: 1 }])).mockResolvedValueOnce(rows({}));
+    mockQuery.mockResolvedValueOnce(rows([{ x: 1 }])).mockResolvedValueOnce(rows([]));
 
     const res = await request(app)
       .post("/api/teacher/tasks/create")
@@ -217,7 +222,7 @@ describe("POST /api/teacher/tasks/create", () => {
     mockQuery
       .mockResolvedValueOnce(rows([{ x: 1 }])) // ownsClass
       .mockResolvedValueOnce(rows([{ x: 1 }])) // student in class
-      .mockResolvedValueOnce(rows({})); // insert
+      .mockResolvedValueOnce(rows([])); // insert
     mockIsFeatureEnabled.mockResolvedValueOnce(true);
 
     const res = await request(app)
@@ -238,7 +243,7 @@ describe("DELETE /api/teacher/tasks/:id", () => {
   });
 
   it("deletes the task", async () => {
-    mockQuery.mockResolvedValueOnce(rows([{ id: 1 }])).mockResolvedValueOnce(rows({}));
+    mockQuery.mockResolvedValueOnce(rows([{ id: 1 }])).mockResolvedValueOnce(rows([]));
     const res = await request(app).delete("/api/teacher/tasks/1").set("Cookie", teacherCookie);
     expect(res.status).toBe(200);
   });
@@ -283,7 +288,7 @@ describe("GET /api/teacher/classes/:classId/students/:studentId/parent-contacts"
           }
         ])
       ) // guardian query
-      .mockResolvedValueOnce(rows({})); // audit insert
+      .mockResolvedValueOnce(rows([])); // audit insert
 
     const res = await request(app)
       .get("/api/teacher/classes/1/students/5/parent-contacts")

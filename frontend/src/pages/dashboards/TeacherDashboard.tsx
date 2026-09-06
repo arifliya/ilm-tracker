@@ -83,6 +83,17 @@ interface AttendanceHistoryRow {
   total_count: number;
 }
 
+interface NotificationItem {
+  id: number;
+  audience: "parent" | "staff";
+  title: string;
+  message: string;
+  created_at: string;
+  read_at: string | null;
+  sender_first_name: string;
+  sender_last_name: string;
+}
+
 const todayStr = () => new Date().toISOString().slice(0, 10);
 
 const BASE_NAV_ITEMS: DashboardNavItem[] = [
@@ -151,7 +162,7 @@ const TeacherDashboard: React.FC = () => {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
-  const [notifications, setNotifications] = useState<any[]>([]);
+  const [notifications, setNotifications] = useState<NotificationItem[]>([]);
 
   const { confirm, ConfirmDialog } = useConfirm();
 
@@ -1479,7 +1490,7 @@ const TeacherDashboard: React.FC = () => {
             <p style={styles.text}>You have no notifications yet.</p>
           ) : (
             <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-              {notifications.map((n: any) => {
+              {notifications.map(n => {
                 const isUnread = !n.read_at;
                 return (
                   <div

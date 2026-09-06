@@ -1,7 +1,9 @@
 import axios from "axios";
 
 export const api = axios.create({
-  baseURL: import.meta.env.VITE_API_URL || "http://localhost:4000/api",
+  // 8787 is wrangler dev's default port (the old Express dev server used
+  // 4000) — only relevant as a fallback if VITE_API_URL isn't set locally.
+  baseURL: import.meta.env.VITE_API_URL || "http://localhost:8787/api",
   withCredentials: true
 });
 

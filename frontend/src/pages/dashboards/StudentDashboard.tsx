@@ -20,9 +20,23 @@ const SECTION_TITLES: Record<SectionKey, string> = {
   tasks: "My Tasks"
 };
 
+interface ClassItem {
+  id: number;
+  class_name: string;
+  year_group: string;
+}
+
+interface TaskItem {
+  id: number;
+  title: string;
+  class_name: string;
+  due_date: string;
+  description: string;
+}
+
 const StudentDashboard: React.FC = () => {
-  const [classes, setClasses] = useState<any[]>([]);
-  const [tasks, setTasks] = useState<any[]>([]);
+  const [classes, setClasses] = useState<ClassItem[]>([]);
+  const [tasks, setTasks] = useState<TaskItem[]>([]);
   const [loading, setLoading] = useState(true);
 
   const [selectedSection, setSelectedSection] = useState<SectionKey>("classes");

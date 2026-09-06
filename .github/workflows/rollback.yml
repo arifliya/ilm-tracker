@@ -1,0 +1,205 @@
+name: Rollback
+
+# Manual only — never triggered automatically. Pick any combination of
+# backend/frontend/database to roll back in one dispatch; each is fully
+# independent via its own `if:` below. No input defaults to "roll back to
+# whatever's previous" — every target is an explicit ID/ref/count so the
+# audit trail (who rolled back what, to where) is unambiguous.
+on:
+  workflow_dispatch:
+    inputs:
+      backend_version_id:
+        description: >
+          Worker version ID to roll back to (run `wrangler deployments
+          list --name ilm-backend --json` yourself first to find one).
+          Leave blank to skip backend rollback.
+        required: false
+        type: string
+      backend_reason:
+        description: Reason for the backend rollback (recorded via wrangler's -m flag)
+        required: false
+        type: string
+        default: "Manual rollback via GitHub Actions"
+      frontend_ref:
+        description: >
+          Git tag/release name to rebuild and redeploy to Pages. Leave
+          blank to skip frontend rollback.
+        required: false
+        type: string
+      database_rollback_count:
+        description: >
+          Number of Liquibase changesets to roll back, most-recent-first
+          (e.g. 1). Leave blank/0 to skip database rollback.
+        required: false
+        type: string
+        default: "0"
+
+jobs:
+  rollback-backend:
+    name: Rollback backend (Worker)
+    if: ${{ inputs.backend_version_id != '' }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 26
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - run: npm ci
+
+      - name: Roll back to specified version
+        run: |
+          npx wrangler rollback "${{ inputs.backend_version_id }}" \
+            --name ilm-backend \
+            -m "${{ inputs.backend_reason }}" \
+            -y
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+
+      - name: Smoke test
+        run: |
+          sleep 5
+          curl -sf https://ilm-backend.jassat-ibrahim.workers.dev/healthz
+
+  rollback-frontend:
+    name: Rollback frontend (Pages) — rebuild old ref and redeploy
+    if: ${{ inputs.frontend_ref != '' }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      # There's no "wrangler pages rollback" — Pages has no CLI promote
+      # command (confirmed via `wrangler pages deployment --help`), so
+      # rolling back means rebuilding the old ref's source and publishing
+      # it as a new deployment on top, using the same --branch main pin as
+      # a normal deploy.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.frontend_ref }}
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 26
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - run: npm ci
+      - run: npm run build
+        env:
+          VITE_API_URL: https://ilm-backend.jassat-ibrahim.workers.dev/api
+
+      - run: npx wrangler pages deploy dist --project-name=ilm-tracker --branch main
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+
+  preview-database-rollback:
+    name: Preview database rollback (no gate — reviewer reads this before approving)
+    if: ${{ inputs.database_rollback_count != '' && inputs.database_rollback_count != '0' }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: liquibase
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Parse DATABASE_URL into JDBC pieces
+        id: dburl
+        run: |
+          node -e '
+            const u = new URL(process.env.DATABASE_URL);
+            const host = u.hostname + (u.port ? ":" + u.port : "");
+            const db = u.pathname.replace(/^\//, "");
+            const params = new URLSearchParams(u.search);
+            if (!params.has("sslmode")) params.set("sslmode", "require");
+            console.log(`jdbc_url=jdbc:postgresql://${host}/${db}?${params.toString()}`);
+            console.log(`username=${decodeURIComponent(u.username)}`);
+          ' >> "$GITHUB_OUTPUT"
+          node -e 'console.log(decodeURIComponent(new URL(process.env.DATABASE_URL).password))' | \
+            (read -r pw; echo "password=$pw" >> "$GITHUB_OUTPUT")
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+      - name: Mask parsed credentials in logs
+        run: |
+          echo "::add-mask::${{ steps.dburl.outputs.username }}"
+          echo "::add-mask::${{ steps.dburl.outputs.password }}"
+
+      - name: Preview rollback SQL (dry run — nothing applied yet)
+        run: |
+          OUTPUT=$(docker run --rm \
+            -v "$(pwd)/changelog:/liquibase/changelog" \
+            -v "$(pwd)/drivers:/liquibase/lib" \
+            -e LIQUIBASE_COMMAND_URL="${{ steps.dburl.outputs.jdbc_url }}" \
+            -e LIQUIBASE_COMMAND_USERNAME="${{ steps.dburl.outputs.username }}" \
+            -e LIQUIBASE_COMMAND_PASSWORD="${{ steps.dburl.outputs.password }}" \
+            -e LIQUIBASE_COMMAND_CHANGELOG_FILE="changelog/changelog-master.xml" \
+            -e LIQUIBASE_COMMAND_ROLLBACK_COUNT="${{ inputs.database_rollback_count }}" \
+            liquibase/liquibase:4.29 rollback-count-sql)
+          echo "$OUTPUT"
+          {
+            echo "### Liquibase rollback preview (rollback-count=${{ inputs.database_rollback_count }})"
+            echo "Review this SQL before approving the rollback-database job below."
+            echo '```sql'
+            echo "$OUTPUT"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  rollback-database:
+    name: Rollback database (Liquibase) — requires approval
+    needs: preview-database-rollback
+    runs-on: ubuntu-latest
+    # Required-reviewer approval gate — create this GitHub Environment in
+    # repo Settings > Environments first (see DEPLOY_RUNBOOK.md). The job
+    # (and every step in it) sits paused until an approved reviewer clicks
+    # Approve; by then, preview-database-rollback's job summary above
+    # already shows the real dry-run SQL to approve against.
+    environment: production-db-rollback
+    defaults:
+      run:
+        working-directory: liquibase
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Parse DATABASE_URL into JDBC pieces
+        id: dburl
+        run: |
+          node -e '
+            const u = new URL(process.env.DATABASE_URL);
+            const host = u.hostname + (u.port ? ":" + u.port : "");
+            const db = u.pathname.replace(/^\//, "");
+            const params = new URLSearchParams(u.search);
+            if (!params.has("sslmode")) params.set("sslmode", "require");
+            console.log(`jdbc_url=jdbc:postgresql://${host}/${db}?${params.toString()}`);
+            console.log(`username=${decodeURIComponent(u.username)}`);
+          ' >> "$GITHUB_OUTPUT"
+          node -e 'console.log(decodeURIComponent(new URL(process.env.DATABASE_URL).password))' | \
+            (read -r pw; echo "password=$pw" >> "$GITHUB_OUTPUT")
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+      - name: Mask parsed credentials in logs
+        run: |
+          echo "::add-mask::${{ steps.dburl.outputs.username }}"
+          echo "::add-mask::${{ steps.dburl.outputs.password }}"
+
+      - name: Apply rollback
+        run: |
+          docker run --rm \
+            -v "$(pwd)/changelog:/liquibase/changelog" \
+            -v "$(pwd)/drivers:/liquibase/lib" \
+            -e LIQUIBASE_COMMAND_URL="${{ steps.dburl.outputs.jdbc_url }}" \
+            -e LIQUIBASE_COMMAND_USERNAME="${{ steps.dburl.outputs.username }}" \
+            -e LIQUIBASE_COMMAND_PASSWORD="${{ steps.dburl.outputs.password }}" \
+            -e LIQUIBASE_COMMAND_CHANGELOG_FILE="changelog/changelog-master.xml" \
+            -e LIQUIBASE_COMMAND_ROLLBACK_COUNT="${{ inputs.database_rollback_count }}" \
+            liquibase/liquibase:4.29 rollback-count
+          echo "Rolled back ${{ inputs.database_rollback_count }} changeset(s)." >> "$GITHUB_STEP_SUMMARY"

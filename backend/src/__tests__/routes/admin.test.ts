@@ -3,22 +3,29 @@ jest.mock("../../utils/featureFlags", () => ({
   isFeatureEnabled: jest.fn()
 }));
 
-import request from "supertest";
-import { app } from "../../app";
-import { pool } from "../../config/db";
-import { rows, mockConnection } from "../helpers/db";
+import app from "../../app";
+import { rows } from "../helpers/db";
 import { authCookie } from "../helpers/auth";
+import { request } from "../helpers/request";
 import { isFeatureEnabled } from "../../utils/featureFlags";
 
-const mockQuery = pool.query as jest.Mock;
-const mockGetConnection = pool.getConnection as jest.Mock;
+const { mockDb } = jest.requireMock<typeof import("../../config/__mocks__/db")>("../../config/db");
+const mockQuery = mockDb.query as jest.Mock;
 const mockIsFeatureEnabled = isFeatureEnabled as jest.Mock;
 
-const adminCookie = authCookie({ userId: 1, role: "admin", schoolId: 10 });
-const ownerCookie = authCookie({ userId: 2, role: "owner", schoolId: 10 });
-const sysAdminCookie = authCookie({ userId: 3, role: "system_admin", schoolId: null });
-const parentCookie = authCookie({ userId: 4, role: "parent", schoolId: 10 });
-const maintainerCookie = authCookie({ userId: 5, role: "maintainer", schoolId: 10 });
+let adminCookie: string;
+let ownerCookie: string;
+let sysAdminCookie: string;
+let parentCookie: string;
+let maintainerCookie: string;
+
+beforeAll(async () => {
+  adminCookie = await authCookie({ userId: 1, role: "admin", schoolId: 10 });
+  ownerCookie = await authCookie({ userId: 2, role: "owner", schoolId: 10 });
+  sysAdminCookie = await authCookie({ userId: 3, role: "system_admin", schoolId: null });
+  parentCookie = await authCookie({ userId: 4, role: "parent", schoolId: 10 });
+  maintainerCookie = await authCookie({ userId: 5, role: "maintainer", schoolId: 10 });
+});
 
 // Mirrors admin.ts's own todayStr/daysAgoStr (not exported) so date-range
 // assertions stay correct regardless of what day the suite runs.
@@ -40,7 +47,7 @@ describe("GET /api/admin/classes", () => {
     mockQuery.mockResolvedValueOnce(rows([{ id: 1 }]));
     const res = await request(app).get("/api/admin/classes").set("Cookie", adminCookie);
     expect(res.status).toBe(200);
-    expect(mockQuery.mock.calls[0][0]).toMatch(/WHERE c.school_id = \?/);
+    expect(mockQuery.mock.calls[0][0]).toMatch(/WHERE c.school_id = \$1/);
     expect(mockQuery.mock.calls[0][1]).toEqual([10]);
   });
 
@@ -92,7 +99,7 @@ describe("POST /api/admin/classes", () => {
   it("creates a class with a school-prefixed code", async () => {
     mockQuery
       .mockResolvedValueOnce(rows([{ school_code: "ILM2026" }])) // getSchoolCode
-      .mockResolvedValueOnce(rows({ affectedRows: 1 })); // insert
+      .mockResolvedValueOnce(rows([])); // insert
 
     const res = await request(app)
       .post("/api/admin/classes")
@@ -106,7 +113,7 @@ describe("POST /api/admin/classes", () => {
 
   it("409s on a duplicate class code", async () => {
     mockQuery.mockResolvedValueOnce(rows([{ school_code: "ILM2026" }]));
-    mockQuery.mockRejectedValueOnce({ code: "ER_DUP_ENTRY" });
+    mockQuery.mockRejectedValueOnce({ code: "23505" });
 
     const res = await request(app)
       .post("/api/admin/classes")
@@ -131,7 +138,7 @@ describe("PUT /api/admin/classes/:id", () => {
     mockQuery
       .mockResolvedValueOnce(rows([{ school_id: 10 }])) // getClassSchoolId
       .mockResolvedValueOnce(rows([{ school_code: "ILM2026" }])) // getSchoolCode
-      .mockResolvedValueOnce(rows({ affectedRows: 1 })); // update
+      .mockResolvedValueOnce(rows([])); // update
 
     const res = await request(app)
       .put("/api/admin/classes/5")
@@ -153,9 +160,9 @@ describe("DELETE /api/admin/classes/:id", () => {
   it("deletes relations then the class", async () => {
     mockQuery
       .mockResolvedValueOnce(rows([{ school_id: 10 }]))
-      .mockResolvedValueOnce(rows({}))
-      .mockResolvedValueOnce(rows({}))
-      .mockResolvedValueOnce(rows({}));
+      .mockResolvedValueOnce(rows([]))
+      .mockResolvedValueOnce(rows([]))
+      .mockResolvedValueOnce(rows([]));
 
     const res = await request(app).delete("/api/admin/classes/5").set("Cookie", adminCookie);
     expect(res.status).toBe(200);
@@ -192,7 +199,7 @@ describe("POST /api/admin/classes/:id/assign-teacher", () => {
     mockQuery
       .mockResolvedValueOnce(rows([{ school_id: 10 }]))
       .mockResolvedValueOnce(rows([{ school_id: 10 }]))
-      .mockResolvedValueOnce(rows({}));
+      .mockResolvedValueOnce(rows([]));
 
     const res = await request(app)
       .post("/api/admin/classes/5/assign-teacher")
@@ -213,7 +220,7 @@ describe("POST /api/admin/classes/:id/remove-teacher", () => {
   });
 
   it("removes the teacher from the class", async () => {
-    mockQuery.mockResolvedValueOnce(rows([{ school_id: 10 }])).mockResolvedValueOnce(rows({}));
+    mockQuery.mockResolvedValueOnce(rows([{ school_id: 10 }])).mockResolvedValueOnce(rows([]));
 
     const res = await request(app)
       .post("/api/admin/classes/5/remove-teacher")
@@ -250,7 +257,7 @@ describe("POST /api/admin/classes/:id/assign-student", () => {
     mockQuery
       .mockResolvedValueOnce(rows([{ school_id: 10 }]))
       .mockResolvedValueOnce(rows([{ school_id: 10 }]))
-      .mockResolvedValueOnce(rows({}));
+      .mockResolvedValueOnce(rows([]));
 
     const res = await request(app)
       .post("/api/admin/classes/5/assign-student")
@@ -263,7 +270,7 @@ describe("POST /api/admin/classes/:id/assign-student", () => {
 
 describe("POST /api/admin/classes/:id/remove-student", () => {
   it("removes the student from the class", async () => {
-    mockQuery.mockResolvedValueOnce(rows([{ school_id: 10 }])).mockResolvedValueOnce(rows({}));
+    mockQuery.mockResolvedValueOnce(rows([{ school_id: 10 }])).mockResolvedValueOnce(rows([]));
 
     const res = await request(app)
       .post("/api/admin/classes/5/remove-student")
@@ -275,12 +282,22 @@ describe("POST /api/admin/classes/:id/remove-student", () => {
 });
 
 describe("GET /api/admin/teachers", () => {
-  it("groups classes under each teacher", async () => {
+  it("returns the plain array (dropdown mode) when no page/pageSize is given", async () => {
     mockQuery.mockResolvedValueOnce(
       rows([
-        { teacher_id: 1, username: "t1", email: "t1@x.com", first_name: "Tara", surname: "One", class_id: 5, class_name: "7A", year_group: "7" },
-        { teacher_id: 1, username: "t1", email: "t1@x.com", first_name: "Tara", surname: "One", class_id: 6, class_name: "7B", year_group: "7" },
-        { teacher_id: 2, username: "t2", email: "t2@x.com", first_name: null, surname: null, class_id: null, class_name: null, year_group: null }
+        {
+          total_count: "2",
+          teacher_id: 1,
+          username: "t1",
+          email: "t1@x.com",
+          first_name: "Tara",
+          surname: "One",
+          assigned_classes: [
+            { id: 5, class_name: "7A", year_group: "7" },
+            { id: 6, class_name: "7B", year_group: "7" }
+          ]
+        },
+        { total_count: "2", teacher_id: 2, username: "t2", email: "t2@x.com", first_name: null, surname: null, assigned_classes: [] }
       ])
     );
 
@@ -290,6 +307,46 @@ describe("GET /api/admin/teachers", () => {
     expect(res.body).toHaveLength(2);
     expect(res.body[0].assigned_classes).toHaveLength(2);
     expect(res.body[1].assigned_classes).toHaveLength(0);
+    // Dropdown mode never paginates — no LIMIT/OFFSET in the query.
+    expect(mockQuery.mock.calls[0][0]).not.toMatch(/LIMIT/);
+  });
+
+  it("falls back to JSON.parse if assigned_classes comes back as a raw string", async () => {
+    mockQuery.mockResolvedValueOnce(
+      rows([
+        {
+          total_count: "1",
+          teacher_id: 1,
+          username: "t1",
+          email: "t1@x.com",
+          first_name: "Tara",
+          surname: "One",
+          assigned_classes: JSON.stringify([{ id: 5, class_name: "7A", year_group: "7" }])
+        }
+      ])
+    );
+
+    const res = await request(app).get("/api/admin/teachers").set("Cookie", adminCookie);
+
+    expect(res.status).toBe(200);
+    expect(res.body[0].assigned_classes).toEqual([{ id: 5, class_name: "7A", year_group: "7" }]);
+  });
+
+  it("returns { teachers, total } and applies page/pageSize/search/sort when given", async () => {
+    mockQuery.mockResolvedValueOnce(rows([]));
+
+    const res = await request(app)
+      .get("/api/admin/teachers?page=1&pageSize=5&search=tar&sort=za")
+      .set("Cookie", adminCookie);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ teachers: [], total: 0 });
+
+    const [sql, params] = mockQuery.mock.calls[0];
+    expect(sql).toMatch(/ORDER BY u\.username DESC/);
+    expect(sql).toMatch(/LIMIT \$3 OFFSET \$4/);
+    // school scope, then the ILIKE pattern, then LIMIT then OFFSET.
+    expect(params).toEqual([10, "%tar%", 5, 5]);
   });
 });
 
@@ -304,10 +361,10 @@ describe("DELETE /api/admin/teachers/:id", () => {
     mockQuery
       .mockResolvedValueOnce(rows([{ school_id: 10 }])) // getUserSchoolId
       .mockResolvedValueOnce(rows([])) // parents lookup (none)
-      .mockResolvedValueOnce(rows({})) // delete staff_details
-      .mockResolvedValueOnce(rows({})) // delete teacher_classes
-      .mockResolvedValueOnce(rows({})) // update students set user_id null
-      .mockResolvedValueOnce(rows({})); // delete users
+      .mockResolvedValueOnce(rows([])) // delete staff_details
+      .mockResolvedValueOnce(rows([])) // delete teacher_classes
+      .mockResolvedValueOnce(rows([])) // update students set user_id null
+      .mockResolvedValueOnce(rows([])); // delete users
 
     const res = await request(app).delete("/api/admin/teachers/7").set("Cookie", adminCookie);
     expect(res.status).toBe(200);
@@ -315,30 +372,69 @@ describe("DELETE /api/admin/teachers/:id", () => {
 });
 
 describe("GET /api/admin/students-parents", () => {
-  it("returns the joined overview with guardians (mysql2 already parses JSON_ARRAYAGG into a real array)", async () => {
+  it("returns the joined overview as a plain array (dropdown mode) when no page/pageSize is given", async () => {
     mockQuery.mockResolvedValueOnce(
-      rows([{ student_id: 1, guardians: [{ parent_id: 9, first_name: "Sam" }] }])
+      rows([{ total_count: "1", student_id: 1, guardians: [{ parent_id: 9, first_name: "Sam" }] }])
     );
     const res = await request(app).get("/api/admin/students-parents").set("Cookie", ownerCookie);
     expect(res.status).toBe(200);
     expect(res.body).toEqual([{ student_id: 1, guardians: [{ parent_id: 9, first_name: "Sam" }] }]);
+    expect(mockQuery.mock.calls[0][0]).not.toMatch(/LIMIT/);
   });
 
   it("falls back to JSON.parse if guardians comes back as a raw string", async () => {
     mockQuery.mockResolvedValueOnce(
-      rows([{ student_id: 1, guardians: JSON.stringify([{ parent_id: 9, first_name: "Sam" }]) }])
+      rows([{ total_count: "1", student_id: 1, guardians: JSON.stringify([{ parent_id: 9, first_name: "Sam" }]) }])
     );
     const res = await request(app).get("/api/admin/students-parents").set("Cookie", ownerCookie);
     expect(res.status).toBe(200);
     expect(res.body).toEqual([{ student_id: 1, guardians: [{ parent_id: 9, first_name: "Sam" }] }]);
   });
+
+  it("returns { studentsParents, total } and applies page/pageSize when given, matching student or guardian name on search", async () => {
+    mockQuery.mockResolvedValueOnce(rows([]));
+
+    const res = await request(app)
+      .get("/api/admin/students-parents?page=1&pageSize=5&search=sam&sort=za")
+      .set("Cookie", ownerCookie);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ studentsParents: [], total: 0 });
+
+    const [sql, params] = mockQuery.mock.calls[0];
+    expect(sql).toMatch(/ORDER BY s\.first_name DESC, s\.surname DESC/);
+    expect(sql).toMatch(/EXISTS \(/);
+    expect(sql).toMatch(/LIMIT \$3 OFFSET \$4/);
+    // school scope, then one ILIKE pattern reused 4x in the SQL text
+    // (student first/surname, guardian first/surname — same placeholder,
+    // not four separate params), then LIMIT then OFFSET.
+    expect(params).toEqual([10, "%sam%", 5, 5]);
+  });
 });
 
 describe("GET /api/admin/parents", () => {
-  it("returns parents including those with zero students", async () => {
-    mockQuery.mockResolvedValueOnce(rows([{ parent_id: 1, student_count: 0 }]));
+  it("returns parents (including those with zero students) as a plain array when no page/pageSize is given", async () => {
+    mockQuery.mockResolvedValueOnce(rows([{ total_count: "1", parent_id: 1, student_count: 0 }]));
     const res = await request(app).get("/api/admin/parents").set("Cookie", ownerCookie);
     expect(res.status).toBe(200);
+    expect(res.body).toEqual([{ parent_id: 1, student_count: 0 }]);
+    expect(mockQuery.mock.calls[0][0]).not.toMatch(/LIMIT/);
+  });
+
+  it("returns { parents, total } and applies page/pageSize/search/sort when given", async () => {
+    mockQuery.mockResolvedValueOnce(rows([]));
+
+    const res = await request(app)
+      .get("/api/admin/parents?page=0&pageSize=5&search=doe&sort=za")
+      .set("Cookie", ownerCookie);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ parents: [], total: 0 });
+
+    const [sql, params] = mockQuery.mock.calls[0];
+    expect(sql).toMatch(/ORDER BY p\.surname DESC, p\.first_name DESC/);
+    expect(sql).toMatch(/LIMIT \$3 OFFSET \$4/);
+    expect(params).toEqual([10, "%doe%", 5, 0]);
   });
 });
 
@@ -360,6 +456,7 @@ describe("GET /api/admin/users-all", () => {
     mockQuery.mockResolvedValueOnce(
       rows([
         {
+          total_count: "1",
           id: 1,
           username: "jane",
           user_email: "login@x.com",
@@ -378,9 +475,9 @@ describe("GET /api/admin/users-all", () => {
           parent_email: "jane@x.com",
           staff_first_name: null,
           staff_last_name: null,
-          // mysql2 already parses a JSON_ARRAYAGG result into a real array
-          // (the column reports as MySQL type JSON) — a plain JS array here
-          // matches actual live behavior, not a JSON string.
+          // The driver already parses a JSON_ARRAYAGG result into a real array
+          // — a plain JS array here matches actual live behavior, not a JSON
+          // string.
           students: [{ id: 1, first_name: "Sam", surname: "Doe", address1: "1 Road" }]
         }
       ])
@@ -389,15 +486,17 @@ describe("GET /api/admin/users-all", () => {
     const res = await request(app).get("/api/admin/users-all").set("Cookie", ownerCookie);
 
     expect(res.status).toBe(200);
-    expect(res.body[0].first_name).toBe("Jane");
-    expect(res.body[0].email).toBe("jane@x.com");
-    expect(res.body[0].students).toHaveLength(1);
+    expect(res.body.total).toBe(1);
+    expect(res.body.users[0].first_name).toBe("Jane");
+    expect(res.body.users[0].email).toBe("jane@x.com");
+    expect(res.body.users[0].students).toHaveLength(1);
   });
 
   it("strips student cards for student-role users (Option C)", async () => {
     mockQuery.mockResolvedValueOnce(
       rows([
         {
+          total_count: "1",
           id: 2,
           username: "sam",
           user_email: "sam@x.com",
@@ -411,17 +510,68 @@ describe("GET /api/admin/users-all", () => {
     const res = await request(app).get("/api/admin/users-all").set("Cookie", sysAdminCookie);
 
     expect(res.status).toBe(200);
-    expect(res.body[0].students).toEqual([]);
-    expect(res.body[0].first_name).toBeNull();
+    expect(res.body.users[0].students).toEqual([]);
+    expect(res.body.users[0].first_name).toBeNull();
+  });
+
+  it("applies page/pageSize as LIMIT/OFFSET, search as a username ILIKE filter, and sort as ORDER BY direction", async () => {
+    mockQuery.mockResolvedValueOnce(rows([]));
+
+    const res = await request(app)
+      .get("/api/admin/users-all?page=2&pageSize=10&search=jan&sort=za")
+      .set("Cookie", ownerCookie);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ users: [], total: 0 });
+
+    const [sql, params] = mockQuery.mock.calls[0];
+    expect(sql).toMatch(/ORDER BY u\.username DESC/);
+    expect(sql).toMatch(/LIMIT \$3 OFFSET \$4/);
+    // school scope, then the ILIKE pattern, then LIMIT then OFFSET, in
+    // that placeholder order.
+    expect(params).toEqual([10, "%jan%", 10, 20]);
+  });
+
+  it("caps pageSize at 100 and falls back to page 0 for an invalid page value", async () => {
+    mockQuery.mockResolvedValueOnce(rows([]));
+
+    const res = await request(app)
+      .get("/api/admin/users-all?page=-5&pageSize=9999")
+      .set("Cookie", sysAdminCookie);
+
+    expect(res.status).toBe(200);
+    const [, params] = mockQuery.mock.calls[0];
+    // system_admin has no school filter, so it's just [limit, offset].
+    expect(params).toEqual([100, 0]);
   });
 });
 
 describe("GET /api/admin/pending-users", () => {
-  it("includes the requester's school filter for non-system_admin", async () => {
+  it("includes the requester's school filter for non-system_admin, plus default pagination", async () => {
     mockQuery.mockResolvedValueOnce(rows([]));
     const res = await request(app).get("/api/admin/pending-users").set("Cookie", adminCookie);
     expect(res.status).toBe(200);
-    expect(mockQuery.mock.calls[0][1]).toEqual([10]);
+    expect(res.body).toEqual({ pendingUsers: [], total: 0 });
+    expect(mockQuery.mock.calls[0][1]).toEqual([10, 20, 0]);
+  });
+
+  it("applies page/pageSize as LIMIT/OFFSET and search as a username ILIKE filter", async () => {
+    mockQuery.mockResolvedValueOnce(
+      rows([{ total_count: "1", id: 7, username: "nicole.adeyemi", email: "n@x.com", requested_role: "parent", school_name: "Ilm School", first_name: "Nicole", last_name: "Adeyemi", contact_number: "0770" }])
+    );
+
+    const res = await request(app)
+      .get("/api/admin/pending-users?page=1&pageSize=5&search=nic")
+      .set("Cookie", adminCookie);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      pendingUsers: [
+        { id: 7, username: "nicole.adeyemi", email: "n@x.com", requested_role: "parent", school_name: "Ilm School", first_name: "Nicole", last_name: "Adeyemi", contact_number: "0770" }
+      ],
+      total: 1
+    });
+    expect(mockQuery.mock.calls[0][1]).toEqual([10, "%nic%", 5, 5]);
   });
 });
 
@@ -475,7 +625,7 @@ describe("POST /api/admin/approve/:id", () => {
       .mockResolvedValueOnce(rows([{ school_id: 10 }]))
       .mockResolvedValueOnce(rows([{ requested_role: "staff" }]))
       .mockResolvedValueOnce(rows([{ id: 4 }])) // role lookup
-      .mockResolvedValueOnce(rows({}));
+      .mockResolvedValueOnce(rows([]));
 
     const res = await request(app)
       .post("/api/admin/approve/9")
@@ -502,9 +652,9 @@ describe("POST /api/admin/approve/:id", () => {
     mockQuery
       .mockResolvedValueOnce(rows([{ school_id: 10 }])) // getUserSchoolId
       .mockResolvedValueOnce(rows([{ id: 4 }])) // role lookup
-      .mockResolvedValueOnce(rows({})) // update users
+      .mockResolvedValueOnce(rows([])) // update users
       .mockResolvedValueOnce(rows([{ id: 55 }])) // parent lookup
-      .mockResolvedValueOnce(rows({})); // update student_guardians
+      .mockResolvedValueOnce(rows([])); // update student_guardians
 
     const res = await request(app)
       .post("/api/admin/approve/9")
@@ -522,14 +672,14 @@ describe("POST /api/admin/approve/:id", () => {
     mockQuery
       .mockResolvedValueOnce(rows([{ school_id: 10 }])) // getUserSchoolId
       .mockResolvedValueOnce(rows([{ id: 4 }])) // role lookup
-      .mockResolvedValueOnce(rows({})) // update users
+      .mockResolvedValueOnce(rows([])) // update users
       .mockResolvedValueOnce(rows([{ id: 55 }])) // parent lookup
-      .mockResolvedValueOnce(rows({})) // update student_guardians
+      .mockResolvedValueOnce(rows([])) // update student_guardians
       .mockResolvedValueOnce(rows([{ id: 701, first_name: "Amy", surname: "Doe" }])) // children with no login
       .mockResolvedValueOnce(rows([{ id: 7 }])) // student role lookup
       .mockResolvedValueOnce(rows([])) // generateUniqueUsername: no collision
-      .mockResolvedValueOnce([{ insertId: 900 }]) // insert users
-      .mockResolvedValueOnce(rows({})); // update students.user_id
+      .mockResolvedValueOnce(rows([{ id: 900 }])) // insert users
+      .mockResolvedValueOnce(rows([])); // update students.user_id
 
     const res = await request(app)
       .post("/api/admin/approve/9")
@@ -552,9 +702,9 @@ describe("POST /api/admin/approve/:id", () => {
     mockQuery
       .mockResolvedValueOnce(rows([{ school_id: 10 }])) // getUserSchoolId
       .mockResolvedValueOnce(rows([{ id: 4 }])) // role lookup
-      .mockResolvedValueOnce(rows({})) // update users
+      .mockResolvedValueOnce(rows([])) // update users
       .mockResolvedValueOnce(rows([{ id: 55 }])) // parent lookup
-      .mockResolvedValueOnce(rows({})); // update student_guardians
+      .mockResolvedValueOnce(rows([])); // update student_guardians
 
     const res = await request(app)
       .post("/api/admin/approve/9")
@@ -588,18 +738,18 @@ describe("POST /api/admin/reject/:id", () => {
       .mockResolvedValueOnce(rows([{ school_id: 10 }])) // getUserSchoolId (adminCookie: not platform-wide, so no getUserRequestedRole call)
       .mockResolvedValueOnce(rows([{ id: 55 }])) // parent lookup
       .mockResolvedValueOnce(rows([{ student_id: 300 }])) // sole-guardian student lookup
-      .mockResolvedValueOnce(rows({})) // delete student_classes
-      .mockResolvedValueOnce(rows({})) // delete students
-      .mockResolvedValueOnce(rows({})) // delete student_guardians (any remaining requests)
-      .mockResolvedValueOnce(rows({})) // delete parents
-      .mockResolvedValueOnce(rows({})) // delete staff_details (no-op)
-      .mockResolvedValueOnce(rows({})); // delete users
+      .mockResolvedValueOnce(rows([])) // delete student_classes
+      .mockResolvedValueOnce(rows([])) // delete students
+      .mockResolvedValueOnce(rows([])) // delete student_guardians (any remaining requests)
+      .mockResolvedValueOnce(rows([])) // delete parents
+      .mockResolvedValueOnce(rows([])) // delete staff_details (no-op)
+      .mockResolvedValueOnce(rows([])); // delete users
 
     const res = await request(app).post("/api/admin/reject/9").set("Cookie", adminCookie);
     expect(res.status).toBe(200);
 
     const studentDeleteCall = mockQuery.mock.calls[4];
-    expect(studentDeleteCall[0]).toMatch(/DELETE FROM students WHERE id IN/);
+    expect(studentDeleteCall[0]).toMatch(/DELETE FROM students WHERE id = ANY/);
     expect(studentDeleteCall[1]).toEqual([[300]]);
   });
 
@@ -608,10 +758,10 @@ describe("POST /api/admin/reject/:id", () => {
       .mockResolvedValueOnce(rows([{ school_id: 10 }])) // getUserSchoolId
       .mockResolvedValueOnce(rows([{ id: 55 }])) // parent lookup
       .mockResolvedValueOnce(rows([])) // sole-guardian lookup: none (student has another guardian)
-      .mockResolvedValueOnce(rows({})) // delete student_guardians (drop the pending request only)
-      .mockResolvedValueOnce(rows({})) // delete parents
-      .mockResolvedValueOnce(rows({})) // delete staff_details (no-op)
-      .mockResolvedValueOnce(rows({})); // delete users
+      .mockResolvedValueOnce(rows([])) // delete student_guardians (drop the pending request only)
+      .mockResolvedValueOnce(rows([])) // delete parents
+      .mockResolvedValueOnce(rows([])) // delete staff_details (no-op)
+      .mockResolvedValueOnce(rows([])); // delete users
 
     const res = await request(app).post("/api/admin/reject/9").set("Cookie", adminCookie);
     expect(res.status).toBe(200);
@@ -663,7 +813,7 @@ describe("POST /api/admin/users/:id/reset-password", () => {
     mockQuery
       .mockResolvedValueOnce(rows([{ school_id: 10 }]))
       .mockResolvedValueOnce(rows([{ name: "teacher" }]))
-      .mockResolvedValueOnce(rows({})); // UPDATE
+      .mockResolvedValueOnce(rows([])); // UPDATE
     mockIsFeatureEnabled.mockResolvedValueOnce(true);
 
     const res = await request(app).post("/api/admin/users/9/reset-password").set("Cookie", adminCookie);
@@ -672,7 +822,7 @@ describe("POST /api/admin/users/:id/reset-password", () => {
     expect(typeof res.body.temporaryPassword).toBe("string");
     expect(res.body.temporaryPassword.length).toBeGreaterThan(0);
     expect(mockQuery).toHaveBeenLastCalledWith(
-      "UPDATE users SET password_hash = ?, token_version = token_version + 1, must_reset_password = TRUE WHERE id = ?",
+      "UPDATE users SET password_hash = $1, token_version = token_version + 1, must_reset_password = TRUE WHERE id = $2",
       expect.arrayContaining(["9"])
     );
   });
@@ -681,7 +831,7 @@ describe("POST /api/admin/users/:id/reset-password", () => {
     mockQuery
       .mockResolvedValueOnce(rows([{ school_id: 77 }]))
       .mockResolvedValueOnce(rows([{ name: "admin" }]))
-      .mockResolvedValueOnce(rows({}));
+      .mockResolvedValueOnce(rows([]));
     mockIsFeatureEnabled.mockResolvedValueOnce(true);
 
     const res = await request(app).post("/api/admin/users/9/reset-password").set("Cookie", sysAdminCookie);
@@ -724,8 +874,8 @@ describe("POST /api/admin/students/:id/generate-login", () => {
       .mockResolvedValueOnce(rows([{ school_id: 10, user_id: null, first_name: "Amy", surname: "Doe" }])) // student lookup
       .mockResolvedValueOnce(rows([{ id: 7 }])) // student role lookup
       .mockResolvedValueOnce(rows([])) // generateUniqueUsername: no collision
-      .mockResolvedValueOnce([{ insertId: 900 }]) // insert users
-      .mockResolvedValueOnce(rows({})); // update students.user_id
+      .mockResolvedValueOnce(rows([{ id: 900 }])) // insert users
+      .mockResolvedValueOnce(rows([])); // update students.user_id
     mockIsFeatureEnabled.mockResolvedValueOnce(true);
 
     const res = await request(app).post("/api/admin/students/1/generate-login").set("Cookie", adminCookie);
@@ -746,8 +896,8 @@ describe("POST /api/admin/students/:id/generate-login", () => {
       .mockResolvedValueOnce(rows([{ id: 7 }])) // student role lookup
       .mockResolvedValueOnce(rows([{ id: 1 }])) // "Amy Doe" taken
       .mockResolvedValueOnce(rows([])) // "Amy Doe 2" free
-      .mockResolvedValueOnce([{ insertId: 901 }]) // insert users
-      .mockResolvedValueOnce(rows({})); // update students.user_id
+      .mockResolvedValueOnce(rows([{ id: 901 }])) // insert users
+      .mockResolvedValueOnce(rows([])); // update students.user_id
     mockIsFeatureEnabled.mockResolvedValueOnce(true);
 
     const res = await request(app).post("/api/admin/students/1/generate-login").set("Cookie", adminCookie);
@@ -767,8 +917,8 @@ describe("DELETE /api/admin/remove-student/:id", () => {
   it("removes the student", async () => {
     mockQuery
       .mockResolvedValueOnce(rows([{ school_id: 10 }]))
-      .mockResolvedValueOnce(rows({}))
-      .mockResolvedValueOnce(rows({}));
+      .mockResolvedValueOnce(rows([]))
+      .mockResolvedValueOnce(rows([]));
 
     const res = await request(app).delete("/api/admin/remove-student/1").set("Cookie", adminCookie);
     expect(res.status).toBe(200);
@@ -796,8 +946,8 @@ describe("DELETE /api/admin/remove-parent/:id", () => {
       .mockResolvedValueOnce(rows([{ school_id: 10 }]))
       .mockResolvedValueOnce(rows([{ cnt: 0 }]))
       .mockResolvedValueOnce(rows([{ user_id: 42 }]))
-      .mockResolvedValueOnce(rows({}))
-      .mockResolvedValueOnce(rows({}));
+      .mockResolvedValueOnce(rows([]))
+      .mockResolvedValueOnce(rows([]));
 
     const res = await request(app).delete("/api/admin/remove-parent/1").set("Cookie", adminCookie);
     expect(res.status).toBe(200);
@@ -840,7 +990,7 @@ describe("POST /api/admin/guardian-requests/approve", () => {
   it("404s when there's no matching pending request", async () => {
     mockQuery
       .mockResolvedValueOnce(rows([{ school_id: 10 }]))
-      .mockResolvedValueOnce([{ affectedRows: 0 }]);
+      .mockResolvedValueOnce(rows([]));
     const res = await request(app)
       .post("/api/admin/guardian-requests/approve")
       .set("Cookie", adminCookie)
@@ -851,7 +1001,7 @@ describe("POST /api/admin/guardian-requests/approve", () => {
   it("approves the pending request", async () => {
     mockQuery
       .mockResolvedValueOnce(rows([{ school_id: 10 }]))
-      .mockResolvedValueOnce([{ affectedRows: 1 }]);
+      .mockResolvedValueOnce(rows([{}]));
     const res = await request(app)
       .post("/api/admin/guardian-requests/approve")
       .set("Cookie", adminCookie)
@@ -872,7 +1022,7 @@ describe("POST /api/admin/guardian-requests/reject", () => {
   it("rejects the pending request", async () => {
     mockQuery
       .mockResolvedValueOnce(rows([{ school_id: 10 }]))
-      .mockResolvedValueOnce([{ affectedRows: 1 }]);
+      .mockResolvedValueOnce(rows([{}]));
     const res = await request(app)
       .post("/api/admin/guardian-requests/reject")
       .set("Cookie", adminCookie)
@@ -914,7 +1064,7 @@ describe("POST /api/admin/students/:studentId/assign-guardian", () => {
     mockQuery
       .mockResolvedValueOnce(rows([{ school_id: 10 }]))
       .mockResolvedValueOnce(rows([{ school_id: 10 }]))
-      .mockResolvedValueOnce(rows({}));
+      .mockResolvedValueOnce(rows([]));
     const res = await request(app)
       .post("/api/admin/students/1/assign-guardian")
       .set("Cookie", adminCookie)
@@ -947,7 +1097,7 @@ describe("POST /api/admin/students/:studentId/remove-guardian", () => {
     mockQuery
       .mockResolvedValueOnce(rows([{ school_id: 10 }]))
       .mockResolvedValueOnce(rows([{ cnt: 2 }]))
-      .mockResolvedValueOnce(rows({}));
+      .mockResolvedValueOnce(rows([]));
     const res = await request(app)
       .post("/api/admin/students/1/remove-guardian")
       .set("Cookie", adminCookie)
@@ -968,7 +1118,7 @@ describe("POST /api/admin/roles/add", () => {
   it("reports failure for an empty name without a 4xx status", async () => {
     const res = await request(app)
       .post("/api/admin/roles/add")
-      .set("Cookie", ownerCookie)
+      .set("Cookie", maintainerCookie)
       .send({ name: "" });
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(false);
@@ -977,7 +1127,7 @@ describe("POST /api/admin/roles/add", () => {
   it("reports failure for an invalid name format", async () => {
     const res = await request(app)
       .post("/api/admin/roles/add")
-      .set("Cookie", ownerCookie)
+      .set("Cookie", maintainerCookie)
       .send({ name: "1bad" });
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(false);
@@ -987,26 +1137,34 @@ describe("POST /api/admin/roles/add", () => {
     mockQuery.mockResolvedValueOnce(rows([{ id: 1 }]));
     const res = await request(app)
       .post("/api/admin/roles/add")
-      .set("Cookie", ownerCookie)
+      .set("Cookie", maintainerCookie)
       .send({ name: "helper" });
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(false);
   });
 
   it("creates a new role", async () => {
-    mockQuery.mockResolvedValueOnce(rows([])).mockResolvedValueOnce(rows({}));
+    mockQuery.mockResolvedValueOnce(rows([])).mockResolvedValueOnce(rows([]));
     const res = await request(app)
       .post("/api/admin/roles/add")
-      .set("Cookie", ownerCookie)
+      .set("Cookie", maintainerCookie)
       .send({ name: "helper" });
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
   });
 
-  it("403s for admin (roles/add is owner/maintainer/system_admin only)", async () => {
+  it("403s for admin (roles/add is maintainer/system_admin only)", async () => {
     const res = await request(app)
       .post("/api/admin/roles/add")
       .set("Cookie", adminCookie)
+      .send({ name: "helper" });
+    expect(res.status).toBe(403);
+  });
+
+  it("403s for owner — roles are platform-wide, not school-scoped", async () => {
+    const res = await request(app)
+      .post("/api/admin/roles/add")
+      .set("Cookie", ownerCookie)
       .send({ name: "helper" });
     expect(res.status).toBe(403);
   });
@@ -1039,10 +1197,10 @@ describe("DELETE /api/admin/users/:id", () => {
     mockQuery
       .mockResolvedValueOnce(rows([{ role: "teacher", school_id: 10 }]))
       .mockResolvedValueOnce(rows([])) // no parent row
-      .mockResolvedValueOnce(rows({})) // delete staff_details
-      .mockResolvedValueOnce(rows({})) // delete teacher_classes
-      .mockResolvedValueOnce(rows({})) // update students
-      .mockResolvedValueOnce(rows({})); // delete users
+      .mockResolvedValueOnce(rows([])) // delete staff_details
+      .mockResolvedValueOnce(rows([])) // delete teacher_classes
+      .mockResolvedValueOnce(rows([])) // update students
+      .mockResolvedValueOnce(rows([])); // delete users
 
     const res = await request(app).delete("/api/admin/users/9").set("Cookie", ownerCookie);
     expect(res.status).toBe(200);
@@ -1063,7 +1221,7 @@ describe("PUT /api/admin/users/:id/update-details", () => {
     mockQuery
       .mockResolvedValueOnce(rows([{ role: "parent", school_id: 10 }]))
       .mockResolvedValueOnce(rows([{ id: 1 }])) // existing parent row
-      .mockResolvedValueOnce(rows({})); // update
+      .mockResolvedValueOnce(rows([])); // update
 
     const res = await request(app)
       .put("/api/admin/users/9/update-details")
@@ -1078,7 +1236,7 @@ describe("PUT /api/admin/users/:id/update-details", () => {
     mockQuery
       .mockResolvedValueOnce(rows([{ role: "teacher", school_id: 10 }]))
       .mockResolvedValueOnce(rows([])) // no existing staff_details
-      .mockResolvedValueOnce(rows({})); // insert
+      .mockResolvedValueOnce(rows([])); // insert
 
     const res = await request(app)
       .put("/api/admin/users/9/update-details")
@@ -1102,7 +1260,7 @@ describe("PUT /api/admin/users/:id/update-details", () => {
     mockQuery
       .mockResolvedValueOnce(rows([{ role: "parent", school_id: 10 }]))
       .mockResolvedValueOnce(rows([{ id: 1 }]));
-    mockQuery.mockRejectedValueOnce({ code: "ER_DUP_ENTRY" });
+    mockQuery.mockRejectedValueOnce({ code: "23505" });
 
     const res = await request(app)
       .put("/api/admin/users/9/update-details")
@@ -1166,9 +1324,9 @@ describe("GET /api/admin/attendance/report", () => {
     const res = await request(app).get("/api/admin/attendance/report").set("Cookie", ownerCookie);
 
     expect(res.status).toBe(200);
-    expect(res.headers["content-type"]).toMatch(/text\/csv/);
-    expect(res.headers["content-disposition"]).toMatch(/attachment/);
-    expect(res.text).toContain("Sam,Doe,7A,Present");
+    expect(res.headers.get("content-type")).toMatch(/text\/csv/);
+    expect(res.headers.get("content-disposition")).toMatch(/attachment/);
+    expect(res.body).toContain("Sam,Doe,7A,Present");
   });
 });
 
@@ -1403,7 +1561,9 @@ describe("POST /api/admin/students/bulk-upload", () => {
   it("reports a missing-field row as an error without touching the database", async () => {
     mockQuery
       .mockResolvedValueOnce(rows([{ id: 9 }])) // parent role lookup
-      .mockResolvedValueOnce(rows([{ id: 7 }])); // student role lookup
+      .mockResolvedValueOnce(rows([{ id: 7 }])) // student role lookup
+      .mockResolvedValueOnce(rows([{ id: 77, class_code: "7A" }])) // batch class lookup
+      .mockResolvedValueOnce(rows([])); // batch parent-email lookup
 
     const res = await request(app)
       .post("/api/admin/students/bulk-upload")
@@ -1413,14 +1573,15 @@ describe("POST /api/admin/students/bulk-upload", () => {
     expect(res.status).toBe(200);
     expect(res.body.results[0]).toMatchObject({ row: 1, status: "error" });
     expect(res.body.results[0].message).toMatch(/student_first_name/);
-    expect(mockGetConnection).not.toHaveBeenCalled();
+    expect(mockQuery).not.toHaveBeenCalledWith("BEGIN");
   });
 
   it("errors a row with an invalid class code", async () => {
     mockQuery
       .mockResolvedValueOnce(rows([{ id: 9 }])) // parent role lookup
       .mockResolvedValueOnce(rows([{ id: 7 }])) // student role lookup
-      .mockResolvedValueOnce(rows([])); // class lookup: not found
+      .mockResolvedValueOnce(rows([])) // batch class lookup: not found
+      .mockResolvedValueOnce(rows([])); // batch parent-email lookup
 
     const res = await request(app)
       .post("/api/admin/students/bulk-upload")
@@ -1436,8 +1597,8 @@ describe("POST /api/admin/students/bulk-upload", () => {
     mockQuery
       .mockResolvedValueOnce(rows([{ id: 9 }])) // parent role lookup
       .mockResolvedValueOnce(rows([{ id: 7 }])) // student role lookup
-      .mockResolvedValueOnce(rows([{ id: 77 }])) // class lookup
-      .mockResolvedValueOnce(rows([{ id: 55, role_name: "teacher" }])); // existing user, wrong role
+      .mockResolvedValueOnce(rows([{ id: 77, class_code: "7A" }])) // batch class lookup
+      .mockResolvedValueOnce(rows([{ id: 55, email: "jane.doe@example.com", role_name: "teacher" }])); // batch parent-email lookup, wrong role
 
     const res = await request(app)
       .post("/api/admin/students/bulk-upload")
@@ -1450,21 +1611,18 @@ describe("POST /api/admin/students/bulk-upload", () => {
   });
 
   it("links an existing parent (by email) as an additional guardian without creating a new account", async () => {
-    const conn = mockConnection();
-    mockGetConnection.mockResolvedValueOnce(conn);
-
     mockQuery
       .mockResolvedValueOnce(rows([{ id: 9 }])) // parent role lookup
       .mockResolvedValueOnce(rows([{ id: 7 }])) // student role lookup
-      .mockResolvedValueOnce(rows([{ id: 77 }])) // class lookup
-      .mockResolvedValueOnce(rows([{ id: 55, role_name: "parent" }])); // existing user found
-
-    conn.query
+      .mockResolvedValueOnce(rows([{ id: 77, class_code: "7A" }])) // batch class lookup
+      .mockResolvedValueOnce(rows([{ id: 55, email: "jane.doe@example.com", role_name: "parent" }])) // batch parent-email lookup
+      .mockResolvedValueOnce(rows([])) // BEGIN
       .mockResolvedValueOnce(rows([{ id: 200 }])) // parents lookup by user_id
       .mockResolvedValueOnce(rows([])) // guardian_code uniqueness check
-      .mockResolvedValueOnce([{ insertId: 300 }]) // insert student
-      .mockResolvedValueOnce([{}]) // insert student_guardians
-      .mockResolvedValueOnce([{}]); // insert student_classes
+      .mockResolvedValueOnce(rows([{ id: 300 }])) // insert student
+      .mockResolvedValueOnce(rows([])) // insert student_guardians
+      .mockResolvedValueOnce(rows([])) // insert student_classes
+      .mockResolvedValueOnce(rows([])); // COMMIT
 
     const res = await request(app)
       .post("/api/admin/students/bulk-upload")
@@ -1474,26 +1632,23 @@ describe("POST /api/admin/students/bulk-upload", () => {
     expect(res.status).toBe(200);
     expect(res.body.results[0]).toMatchObject({ row: 1, status: "created", studentId: 300, parentCreated: false });
     expect(res.body.results[0].temporaryPassword).toBeUndefined();
-    expect(conn.commit).toHaveBeenCalled();
+    expect(mockQuery).toHaveBeenCalledWith("COMMIT");
   });
 
   it("creates a new parent account and returns a temporary password when the email is unknown", async () => {
-    const conn = mockConnection();
-    mockGetConnection.mockResolvedValueOnce(conn);
-
     mockQuery
       .mockResolvedValueOnce(rows([{ id: 9 }])) // parent role lookup
       .mockResolvedValueOnce(rows([{ id: 7 }])) // student role lookup
-      .mockResolvedValueOnce(rows([{ id: 77 }])) // class lookup
-      .mockResolvedValueOnce(rows([])); // no existing user with this email
-
-    conn.query
-      .mockResolvedValueOnce([{ insertId: 400 }]) // insert users
-      .mockResolvedValueOnce([{ insertId: 401 }]) // insert parents
+      .mockResolvedValueOnce(rows([{ id: 77, class_code: "7A" }])) // batch class lookup
+      .mockResolvedValueOnce(rows([])) // batch parent-email lookup: no existing user with this email
+      .mockResolvedValueOnce(rows([])) // BEGIN
+      .mockResolvedValueOnce(rows([{ id: 400 }])) // insert users
+      .mockResolvedValueOnce(rows([{ id: 401 }])) // insert parents
       .mockResolvedValueOnce(rows([])) // guardian_code uniqueness check
-      .mockResolvedValueOnce([{ insertId: 500 }]) // insert student
-      .mockResolvedValueOnce([{}]) // insert student_guardians
-      .mockResolvedValueOnce([{}]); // insert student_classes
+      .mockResolvedValueOnce(rows([{ id: 500 }])) // insert student
+      .mockResolvedValueOnce(rows([])) // insert student_guardians
+      .mockResolvedValueOnce(rows([])) // insert student_classes
+      .mockResolvedValueOnce(rows([])); // COMMIT
 
     const res = await request(app)
       .post("/api/admin/students/bulk-upload")
@@ -1507,24 +1662,24 @@ describe("POST /api/admin/students/bulk-upload", () => {
   });
 
   it("processes a bad row without affecting the others in the same batch", async () => {
-    const conn = mockConnection();
-    mockGetConnection.mockResolvedValueOnce(conn);
-
     mockQuery
       .mockResolvedValueOnce(rows([{ id: 9 }])) // parent role lookup (once per request)
       .mockResolvedValueOnce(rows([{ id: 7 }])) // student role lookup (once per request)
+      // Batched up front for the whole request — only row 1's class code
+      // ("7A") and email resolve to anything; row 2's "BADCODE" isn't in
+      // the result set at all, so it never reaches the database.
+      .mockResolvedValueOnce(rows([{ id: 77, class_code: "7A" }])) // batch class lookup
+      .mockResolvedValueOnce(rows([{ id: 55, email: "jane.doe@example.com", role_name: "parent" }])) // batch parent-email lookup
       // Row 1 (good, existing parent):
-      .mockResolvedValueOnce(rows([{ id: 77 }])) // class lookup
-      .mockResolvedValueOnce(rows([{ id: 55, role_name: "parent" }])) // existing user
-      // Row 2 (bad class code):
-      .mockResolvedValueOnce(rows([])); // class lookup: not found
-
-    conn.query
+      .mockResolvedValueOnce(rows([])) // BEGIN
       .mockResolvedValueOnce(rows([{ id: 200 }])) // parents lookup by user_id
       .mockResolvedValueOnce(rows([])) // guardian_code uniqueness check
-      .mockResolvedValueOnce([{ insertId: 300 }]) // insert student
-      .mockResolvedValueOnce([{}]) // insert student_guardians
-      .mockResolvedValueOnce([{}]); // insert student_classes
+      .mockResolvedValueOnce(rows([{ id: 300 }])) // insert student
+      .mockResolvedValueOnce(rows([])) // insert student_guardians
+      .mockResolvedValueOnce(rows([])) // insert student_classes
+      .mockResolvedValueOnce(rows([])); // COMMIT
+      // Row 2 (bad class code) makes no further database calls at all —
+      // it fails the class-code map lookup before any query would run.
 
     const res = await request(app)
       .post("/api/admin/students/bulk-upload")
@@ -1539,24 +1694,22 @@ describe("POST /api/admin/students/bulk-upload", () => {
 
   it("also provisions a student login when password_management is enabled", async () => {
     mockIsFeatureEnabled.mockResolvedValueOnce(true);
-    const conn = mockConnection();
-    mockGetConnection.mockResolvedValueOnce(conn);
 
     mockQuery
       .mockResolvedValueOnce(rows([{ id: 9 }])) // parent role lookup
       .mockResolvedValueOnce(rows([{ id: 7 }])) // student role lookup
-      .mockResolvedValueOnce(rows([{ id: 77 }])) // class lookup
-      .mockResolvedValueOnce(rows([{ id: 55, role_name: "parent" }])); // existing user found
-
-    conn.query
+      .mockResolvedValueOnce(rows([{ id: 77, class_code: "7A" }])) // batch class lookup
+      .mockResolvedValueOnce(rows([{ id: 55, email: "jane.doe@example.com", role_name: "parent" }])) // batch parent-email lookup
+      .mockResolvedValueOnce(rows([])) // BEGIN
       .mockResolvedValueOnce(rows([{ id: 200 }])) // parents lookup by user_id
       .mockResolvedValueOnce(rows([])) // guardian_code uniqueness check
-      .mockResolvedValueOnce([{ insertId: 300 }]) // insert student
-      .mockResolvedValueOnce([{}]) // insert student_guardians
-      .mockResolvedValueOnce([{}]) // insert student_classes
+      .mockResolvedValueOnce(rows([{ id: 300 }])) // insert student
+      .mockResolvedValueOnce(rows([])) // insert student_guardians
+      .mockResolvedValueOnce(rows([])) // insert student_classes
       .mockResolvedValueOnce(rows([])) // generateUniqueUsername: no collision
-      .mockResolvedValueOnce([{ insertId: 900 }]) // insert users (student)
-      .mockResolvedValueOnce(rows({})); // update students.user_id
+      .mockResolvedValueOnce(rows([{ id: 900 }])) // insert users (student)
+      .mockResolvedValueOnce(rows([])) // update students.user_id
+      .mockResolvedValueOnce(rows([])); // COMMIT
 
     const res = await request(app)
       .post("/api/admin/students/bulk-upload")

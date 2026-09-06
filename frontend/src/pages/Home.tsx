@@ -6,7 +6,7 @@ const Home: React.FC = () => {
   return (
     <div style={styles.pageCentered}>
       <div style={styles.card}>
-        <h1 style={styles.title}>ilm School Portal</h1>
+        <h1 style={styles.title}>Ilm Tracker</h1>
 
         <p style={styles.text}>
           A simple and secure platform for managing school operations.

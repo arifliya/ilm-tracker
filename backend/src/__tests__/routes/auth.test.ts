@@ -7,17 +7,16 @@ jest.mock("../../utils/featureFlags", () => ({
   isFeatureEnabled: jest.fn()
 }));
 
-import request from "supertest";
 import bcrypt from "bcryptjs";
-import jwt from "jsonwebtoken";
-import { app } from "../../app";
-import { pool } from "../../config/db";
-import { rows, mockConnection } from "../helpers/db";
+import { decode } from "hono/jwt";
+import app from "../../app";
+import { rows } from "../helpers/db";
 import { authCookie } from "../helpers/auth";
+import { request } from "../helpers/request";
 import { isFeatureEnabled } from "../../utils/featureFlags";
 
-const mockQuery = pool.query as jest.Mock;
-const mockGetConnection = pool.getConnection as jest.Mock;
+const { mockDb } = jest.requireMock<typeof import("../../config/__mocks__/db")>("../../config/db");
+const mockQuery = mockDb.query as jest.Mock;
 const mockIsFeatureEnabled = isFeatureEnabled as jest.Mock;
 
 beforeEach(() => {
@@ -96,9 +95,7 @@ const validParentPayload = () => ({
     address1: "1 Road",
     postcode: "AB1 2CD"
   },
-  students: [
-    { first_name: "Sam", surname: "Doe", class_code: "7A" }
-  ]
+  students: [{ first_name: "Sam", surname: "Doe", class_code: "7A" }]
 });
 
 describe("POST /api/auth/register-parent", () => {
@@ -110,9 +107,7 @@ describe("POST /api/auth/register-parent", () => {
   });
 
   it("400s when parent or students is missing", async () => {
-    const res = await request(app)
-      .post("/api/auth/register-parent")
-      .send({ user_type: "parent" });
+    const res = await request(app).post("/api/auth/register-parent").send({ user_type: "parent" });
     expect(res.status).toBe(400);
     expect(res.body.message).toMatch(/Missing parent or students/);
   });
@@ -155,6 +150,14 @@ describe("POST /api/auth/register-parent", () => {
     const res = await request(app).post("/api/auth/register-parent").send(payload);
     expect(res.status).toBe(400);
     expect(res.body.message).toMatch(/at least 8 characters/);
+  });
+
+  it("400s when the email isn't a valid format", async () => {
+    const payload = validParentPayload();
+    (payload.parent as any).email = "not-an-email";
+    const res = await request(app).post("/api/auth/register-parent").send(payload);
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/valid email/);
   });
 
   it("400s when contact_number is missing", async () => {
@@ -227,38 +230,35 @@ describe("POST /api/auth/register-parent", () => {
   });
 
   it("registers successfully and inserts the parent, student and class link", async () => {
-    const conn = mockConnection();
-    mockGetConnection.mockResolvedValueOnce(conn);
-
     mockQuery
       .mockResolvedValueOnce(rows([{ id: 1 }])) // school found
       .mockResolvedValueOnce(rows([{ id: 55 }])) // class found
       .mockResolvedValueOnce(rows([])) // email check, clear
       .mockResolvedValueOnce(rows([])) // address check, clear
-      .mockResolvedValueOnce(rows([{ id: 4 }])); // pending role id
-
-    conn.query
-      .mockResolvedValueOnce([{ insertId: 100 }]) // insert users
-      .mockResolvedValueOnce([{ insertId: 200 }]) // insert parents
+      .mockResolvedValueOnce(rows([{ id: 4 }])) // pending role id
+      .mockResolvedValueOnce(rows([])) // BEGIN
+      .mockResolvedValueOnce(rows([{ id: 100 }])) // insert users RETURNING id
+      .mockResolvedValueOnce(rows([{ id: 200 }])) // insert parents RETURNING id
       .mockResolvedValueOnce(rows([])) // guardian_code uniqueness check
-      .mockResolvedValueOnce([{ insertId: 300 }]) // insert students
-      .mockResolvedValueOnce([{}]) // insert student_guardians
-      .mockResolvedValueOnce([{}]); // insert student_classes
+      .mockResolvedValueOnce(rows([{ id: 300 }])) // insert students RETURNING id
+      .mockResolvedValueOnce(rows([])) // insert student_guardians
+      .mockResolvedValueOnce(rows([])) // insert student_classes
+      .mockResolvedValueOnce(rows([])); // COMMIT
 
     const res = await request(app).post("/api/auth/register-parent").send(validParentPayload());
 
     expect(res.status).toBe(201);
     expect(res.body.message).toMatch(/Pending approval/);
-    expect(conn.beginTransaction).toHaveBeenCalled();
-    expect(conn.commit).toHaveBeenCalled();
-    expect(conn.rollback).not.toHaveBeenCalled();
+    expect(mockQuery).toHaveBeenCalledWith("BEGIN");
+    expect(mockQuery).toHaveBeenCalledWith("COMMIT");
+    expect(mockQuery).not.toHaveBeenCalledWith("ROLLBACK");
 
-    const studentInsertCall = conn.query.mock.calls[3];
+    const studentInsertCall = mockQuery.mock.calls[9];
     expect(studentInsertCall[0]).toMatch(/INSERT INTO students/);
-    const guardianLinkCall = conn.query.mock.calls[4];
+    const guardianLinkCall = mockQuery.mock.calls[10];
     expect(guardianLinkCall[0]).toMatch(/INSERT INTO student_guardians/);
     expect(guardianLinkCall[1]).toEqual([300, 200]);
-    const classLinkCall = conn.query.mock.calls[5];
+    const classLinkCall = mockQuery.mock.calls[11];
     expect(classLinkCall[0]).toMatch(/INSERT INTO student_classes/);
     expect(classLinkCall[1]).toEqual([300, 55]);
   });
@@ -285,54 +285,48 @@ describe("POST /api/auth/register-parent", () => {
   });
 
   it("registers with a guardian_links entry, inserting a pending student_guardians row", async () => {
-    const conn = mockConnection();
-    mockGetConnection.mockResolvedValueOnce(conn);
-
     mockQuery
       .mockResolvedValueOnce(rows([{ id: 1 }])) // school found
       .mockResolvedValueOnce(rows([{ id: 55 }])) // class found
       .mockResolvedValueOnce(rows([{ id: 900 }])) // guardian code resolved to an existing student
       .mockResolvedValueOnce(rows([])) // email check, clear
       .mockResolvedValueOnce(rows([])) // address check, clear
-      .mockResolvedValueOnce(rows([{ id: 4 }])); // pending role id
-
-    conn.query
-      .mockResolvedValueOnce([{ insertId: 100 }]) // insert users
-      .mockResolvedValueOnce([{ insertId: 200 }]) // insert parents
+      .mockResolvedValueOnce(rows([{ id: 4 }])) // pending role id
+      .mockResolvedValueOnce(rows([])) // BEGIN
+      .mockResolvedValueOnce(rows([{ id: 100 }])) // insert users RETURNING id
+      .mockResolvedValueOnce(rows([{ id: 200 }])) // insert parents RETURNING id
       .mockResolvedValueOnce(rows([])) // guardian_code uniqueness check (for the new student)
-      .mockResolvedValueOnce([{ insertId: 300 }]) // insert students
-      .mockResolvedValueOnce([{}]) // insert student_guardians (approved, new student)
-      .mockResolvedValueOnce([{}]) // insert student_classes
-      .mockResolvedValueOnce([{}]); // insert student_guardians (pending, linked student)
+      .mockResolvedValueOnce(rows([{ id: 300 }])) // insert students RETURNING id
+      .mockResolvedValueOnce(rows([])) // insert student_guardians (approved, new student)
+      .mockResolvedValueOnce(rows([])) // insert student_classes
+      .mockResolvedValueOnce(rows([])) // insert student_guardians (pending, linked student)
+      .mockResolvedValueOnce(rows([])); // COMMIT
 
     const res = await request(app)
       .post("/api/auth/register-parent")
       .send({ ...validParentPayload(), guardian_links: [{ guardian_code: "STUD0001" }] });
 
     expect(res.status).toBe(201);
-    const pendingLinkCall = conn.query.mock.calls[6];
+    const pendingLinkCall = mockQuery.mock.calls[13];
     expect(pendingLinkCall[0]).toMatch(/INSERT INTO student_guardians/);
     expect(pendingLinkCall[0]).toMatch(/'pending'/);
     expect(pendingLinkCall[1]).toEqual([900, 200]);
   });
 
   it("rolls back and 500s when the insert transaction throws", async () => {
-    const conn = mockConnection();
-    mockGetConnection.mockResolvedValueOnce(conn);
-
     mockQuery
       .mockResolvedValueOnce(rows([{ id: 1 }]))
       .mockResolvedValueOnce(rows([{ id: 55 }]))
       .mockResolvedValueOnce(rows([]))
       .mockResolvedValueOnce(rows([]))
-      .mockResolvedValueOnce(rows([{ id: 4 }]));
-
-    conn.query.mockRejectedValueOnce(new Error("insert failed"));
+      .mockResolvedValueOnce(rows([{ id: 4 }]))
+      .mockResolvedValueOnce(rows([])) // BEGIN
+      .mockRejectedValueOnce(new Error("insert failed"));
 
     const res = await request(app).post("/api/auth/register-parent").send(validParentPayload());
 
     expect(res.status).toBe(500);
-    expect(conn.rollback).toHaveBeenCalled();
+    expect(mockQuery).toHaveBeenCalledWith("ROLLBACK");
   });
 });
 
@@ -387,6 +381,14 @@ describe("POST /api/auth/register-staff", () => {
     expect(res.body.message).toMatch(/at least 8 characters/);
   });
 
+  it("400s when the email isn't a valid format", async () => {
+    const payload = validStaffPayload();
+    (payload as any).email = "not-an-email";
+    const res = await request(app).post("/api/auth/register-staff").send(payload);
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/valid email/);
+  });
+
   it("400s when phone_number is missing", async () => {
     const payload = validStaffPayload();
     (payload as any).phone_number = "";
@@ -420,25 +422,22 @@ describe("POST /api/auth/register-staff", () => {
   });
 
   it("registers successfully and inserts staff_details with a pending role", async () => {
-    const conn = mockConnection();
-    mockGetConnection.mockResolvedValueOnce(conn);
-
     mockQuery
       .mockResolvedValueOnce(rows([{ id: 1 }])) // school found
       .mockResolvedValueOnce(rows([])) // email check, clear
-      .mockResolvedValueOnce(rows([{ id: 4 }])); // pending role id
-
-    conn.query
-      .mockResolvedValueOnce([{ insertId: 100 }]) // insert users
-      .mockResolvedValueOnce([{}]); // insert staff_details
+      .mockResolvedValueOnce(rows([{ id: 4 }])) // pending role id
+      .mockResolvedValueOnce(rows([])) // BEGIN
+      .mockResolvedValueOnce(rows([{ id: 100 }])) // insert users RETURNING id
+      .mockResolvedValueOnce(rows([])) // insert staff_details
+      .mockResolvedValueOnce(rows([])); // COMMIT
 
     const res = await request(app).post("/api/auth/register-staff").send(validStaffPayload());
 
     expect(res.status).toBe(201);
-    expect(conn.commit).toHaveBeenCalled();
-    expect(conn.query.mock.calls[0][0]).toMatch(/INSERT INTO users/);
-    expect(conn.query.mock.calls[0][1]).toContain("staff");
-    expect(conn.query.mock.calls[1][0]).toMatch(/INSERT INTO staff_details/);
+    expect(mockQuery).toHaveBeenCalledWith("COMMIT");
+    expect(mockQuery.mock.calls[4][0]).toMatch(/INSERT INTO users/);
+    expect(mockQuery.mock.calls[4][1]).toContain("staff");
+    expect(mockQuery.mock.calls[5][0]).toMatch(/INSERT INTO staff_details/);
   });
 });
 
@@ -450,9 +449,7 @@ describe("POST /api/auth/login", () => {
 
   it("401s when no matching user is found", async () => {
     mockQuery.mockResolvedValueOnce(rows([]));
-    const res = await request(app)
-      .post("/api/auth/login")
-      .send({ username: "ghost", password: "whatever" });
+    const res = await request(app).post("/api/auth/login").send({ username: "ghost", password: "whatever" });
     expect(res.status).toBe(401);
     expect(res.body.message).toMatch(/Invalid credentials/);
   });
@@ -463,9 +460,7 @@ describe("POST /api/auth/login", () => {
     );
     (bcrypt.compare as jest.Mock).mockResolvedValueOnce(false);
 
-    const res = await request(app)
-      .post("/api/auth/login")
-      .send({ username: "jdoe", password: "wrong" });
+    const res = await request(app).post("/api/auth/login").send({ username: "jdoe", password: "wrong" });
 
     expect(res.status).toBe(401);
   });
@@ -476,17 +471,16 @@ describe("POST /api/auth/login", () => {
     );
     (bcrypt.compare as jest.Mock).mockResolvedValueOnce(true);
 
-    const res = await request(app)
-      .post("/api/auth/login")
-      .send({ username: "jdoe", password: "Passw0rd!" });
+    const res = await request(app).post("/api/auth/login").send({ username: "jdoe", password: "Passw0rd!" });
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ message: "Logged in", role: "admin" });
-    expect(res.headers["set-cookie"]?.[0]).toMatch(/^token=/);
-    expect(res.headers["set-cookie"]?.[0]).toMatch(/HttpOnly/i);
+    const setCookie = res.headers.get("set-cookie");
+    expect(setCookie).toMatch(/^token=/);
+    expect(setCookie).toMatch(/HttpOnly/i);
 
-    const token = res.headers["set-cookie"][0].split(";")[0].split("=")[1];
-    const decoded = jwt.decode(token) as any;
+    const token = setCookie!.split(";")[0].split("=")[1];
+    const decoded = decode(token).payload as any;
     expect(decoded.tokenVersion).toBe(2);
     expect(decoded.mustResetPassword).toBe(false);
   });
@@ -505,8 +499,8 @@ describe("POST /api/auth/login", () => {
       .send({ username: "jdoe", password: "Passw0rd!" });
 
     expect(res.status).toBe(200);
-    const token = res.headers["set-cookie"][0].split(";")[0].split("=")[1];
-    const decoded = jwt.decode(token) as any;
+    const token = res.headers.get("set-cookie")!.split(";")[0].split("=")[1];
+    const decoded = decode(token).payload as any;
     expect(decoded.mustResetPassword).toBe(true);
   });
 });
@@ -520,17 +514,14 @@ describe("POST /api/auth/logout", () => {
   });
 
   it("revokes the session server-side by bumping token_version", async () => {
-    mockQuery.mockResolvedValueOnce(rows({}));
+    mockQuery.mockResolvedValueOnce(rows([]));
 
     const res = await request(app)
       .post("/api/auth/logout")
-      .set("Cookie", authCookie({ userId: 42, role: "teacher", schoolId: 1 }));
+      .set("Cookie", await authCookie({ userId: 42, role: "teacher", schoolId: 1 }));
 
     expect(res.status).toBe(200);
-    expect(mockQuery).toHaveBeenCalledWith(
-      "UPDATE users SET token_version = token_version + 1 WHERE id = ?",
-      [42]
-    );
+    expect(mockQuery).toHaveBeenCalledWith("UPDATE users SET token_version = token_version + 1 WHERE id = $1", [42]);
   });
 
   it("still clears the cookie and succeeds even if revocation fails", async () => {
@@ -538,7 +529,7 @@ describe("POST /api/auth/logout", () => {
 
     const res = await request(app)
       .post("/api/auth/logout")
-      .set("Cookie", authCookie({ userId: 42, role: "teacher", schoolId: 1 }));
+      .set("Cookie", await authCookie({ userId: 42, role: "teacher", schoolId: 1 }));
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ message: "Logged out" });
@@ -552,12 +543,11 @@ describe("GET /api/auth/me", () => {
   });
 
   it("returns the authenticated user with a derived fullName", async () => {
-    const { authCookie } = await import("../helpers/auth");
     mockQuery.mockResolvedValueOnce(rows([{ first_name: "Jane", surname: "Doe" }]));
 
     const res = await request(app)
       .get("/api/auth/me")
-      .set("Cookie", authCookie({ userId: 1, role: "parent", schoolId: 1 }));
+      .set("Cookie", await authCookie({ userId: 1, role: "parent", schoolId: 1 }));
 
     expect(res.status).toBe(200);
     expect(res.body.user.fullName).toBe("Jane Doe");
@@ -565,12 +555,11 @@ describe("GET /api/auth/me", () => {
   });
 
   it("falls back to req.user with fullName:null when the details query fails", async () => {
-    const { authCookie } = await import("../helpers/auth");
     mockQuery.mockRejectedValueOnce(new Error("db down"));
 
     const res = await request(app)
       .get("/api/auth/me")
-      .set("Cookie", authCookie({ userId: 1, role: "parent", schoolId: 1 }));
+      .set("Cookie", await authCookie({ userId: 1, role: "parent", schoolId: 1 }));
 
     expect(res.status).toBe(200);
     expect(res.body.user.userId).toBe(1);
@@ -589,7 +578,7 @@ describe("POST /api/auth/change-password", () => {
     mockIsFeatureEnabled.mockResolvedValueOnce(false);
     const res = await request(app)
       .post("/api/auth/change-password")
-      .set("Cookie", authCookie({ userId: 1, role: "teacher", schoolId: 10 }))
+      .set("Cookie", await authCookie({ userId: 1, role: "teacher", schoolId: 10 }))
       .send({ current_password: "Passw0rd!", new_password: "NewPassw0rd!" });
     expect(res.status).toBe(403);
   });
@@ -598,7 +587,7 @@ describe("POST /api/auth/change-password", () => {
     mockIsFeatureEnabled.mockResolvedValueOnce(true);
     const res = await request(app)
       .post("/api/auth/change-password")
-      .set("Cookie", authCookie({ userId: 1, role: "teacher", schoolId: 10 }))
+      .set("Cookie", await authCookie({ userId: 1, role: "teacher", schoolId: 10 }))
       .send({ current_password: "Passw0rd!" });
     expect(res.status).toBe(400);
   });
@@ -608,7 +597,7 @@ describe("POST /api/auth/change-password", () => {
     mockQuery.mockResolvedValueOnce(rows([]));
     const res = await request(app)
       .post("/api/auth/change-password")
-      .set("Cookie", authCookie({ userId: 1, role: "teacher", schoolId: 10 }))
+      .set("Cookie", await authCookie({ userId: 1, role: "teacher", schoolId: 10 }))
       .send({ current_password: "Passw0rd!", new_password: "NewPassw0rd!" });
     expect(res.status).toBe(404);
   });
@@ -620,7 +609,7 @@ describe("POST /api/auth/change-password", () => {
 
     const res = await request(app)
       .post("/api/auth/change-password")
-      .set("Cookie", authCookie({ userId: 1, role: "teacher", schoolId: 10 }))
+      .set("Cookie", await authCookie({ userId: 1, role: "teacher", schoolId: 10 }))
       .send({ current_password: "WrongPass1", new_password: "NewPassw0rd!" });
 
     expect(res.status).toBe(401);
@@ -633,7 +622,7 @@ describe("POST /api/auth/change-password", () => {
 
     const res = await request(app)
       .post("/api/auth/change-password")
-      .set("Cookie", authCookie({ userId: 1, role: "teacher", schoolId: 10 }))
+      .set("Cookie", await authCookie({ userId: 1, role: "teacher", schoolId: 10 }))
       .send({ current_password: "Passw0rd!", new_password: "short" });
 
     expect(res.status).toBe(400);
@@ -643,33 +632,35 @@ describe("POST /api/auth/change-password", () => {
     mockIsFeatureEnabled.mockResolvedValueOnce(true);
     mockQuery
       .mockResolvedValueOnce(rows([{ password_hash: "hash", token_version: 3 }]))
-      .mockResolvedValueOnce(rows({}));
+      .mockResolvedValueOnce(rows([]));
     (bcrypt.compare as jest.Mock).mockResolvedValueOnce(true);
 
     const res = await request(app)
       .post("/api/auth/change-password")
-      .set("Cookie", authCookie({ userId: 1, username: "jdoe", role: "teacher", schoolId: 10 }))
+      .set("Cookie", await authCookie({ userId: 1, username: "jdoe", role: "teacher", schoolId: 10 }))
       .send({ current_password: "Passw0rd!", new_password: "NewPassw0rd!" });
 
     expect(res.status).toBe(200);
-    expect(mockQuery).toHaveBeenLastCalledWith(
-      "UPDATE users SET password_hash = ?, token_version = ? WHERE id = ?",
-      ["hashed-password", 4, 1]
-    );
-    const token = res.headers["set-cookie"][0].split(";")[0].split("=")[1];
-    const decoded = jwt.decode(token) as any;
+    expect(mockQuery).toHaveBeenLastCalledWith("UPDATE users SET password_hash = $1, token_version = $2 WHERE id = $3", [
+      "hashed-password",
+      4,
+      1
+    ]);
+    const setCookie = res.headers.get("set-cookie");
+    const token = setCookie!.split(";")[0].split("=")[1];
+    const decoded = decode(token).payload as any;
     expect(decoded.tokenVersion).toBe(4);
   });
 
   it("bypasses the feature check for system_admin", async () => {
     mockQuery
       .mockResolvedValueOnce(rows([{ password_hash: "hash", token_version: 0 }]))
-      .mockResolvedValueOnce(rows({}));
+      .mockResolvedValueOnce(rows([]));
     (bcrypt.compare as jest.Mock).mockResolvedValueOnce(true);
 
     const res = await request(app)
       .post("/api/auth/change-password")
-      .set("Cookie", authCookie({ userId: 99, role: "system_admin", schoolId: null }))
+      .set("Cookie", await authCookie({ userId: 99, role: "system_admin", schoolId: null }))
       .send({ current_password: "Passw0rd!", new_password: "NewPassw0rd!" });
 
     expect(res.status).toBe(200);
@@ -688,7 +679,7 @@ describe("POST /api/auth/force-password-reset", () => {
   it("400s when no reset is pending for the account", async () => {
     const res = await request(app)
       .post("/api/auth/force-password-reset")
-      .set("Cookie", authCookie({ userId: 1, role: "teacher", schoolId: 10, mustResetPassword: false }))
+      .set("Cookie", await authCookie({ userId: 1, role: "teacher", schoolId: 10, mustResetPassword: false }))
       .send({ new_password: "NewPassw0rd!" });
     expect(res.status).toBe(400);
   });
@@ -696,7 +687,7 @@ describe("POST /api/auth/force-password-reset", () => {
   it("400s when the new password does not meet the strength rule", async () => {
     const res = await request(app)
       .post("/api/auth/force-password-reset")
-      .set("Cookie", authCookie({ userId: 1, role: "teacher", schoolId: 10, mustResetPassword: true }))
+      .set("Cookie", await authCookie({ userId: 1, role: "teacher", schoolId: 10, mustResetPassword: true }))
       .send({ new_password: "short" });
     expect(res.status).toBe(400);
   });
@@ -705,7 +696,7 @@ describe("POST /api/auth/force-password-reset", () => {
     mockQuery.mockResolvedValueOnce(rows([]));
     const res = await request(app)
       .post("/api/auth/force-password-reset")
-      .set("Cookie", authCookie({ userId: 1, role: "teacher", schoolId: 10, mustResetPassword: true }))
+      .set("Cookie", await authCookie({ userId: 1, role: "teacher", schoolId: 10, mustResetPassword: true }))
       .send({ new_password: "NewPassw0rd!" });
     expect(res.status).toBe(404);
   });
@@ -713,21 +704,21 @@ describe("POST /api/auth/force-password-reset", () => {
   it("clears must_reset_password, bumps token_version, and issues a fresh cookie", async () => {
     mockQuery
       .mockResolvedValueOnce(rows([{ token_version: 5 }]))
-      .mockResolvedValueOnce(rows({}));
+      .mockResolvedValueOnce(rows([]));
 
     const res = await request(app)
       .post("/api/auth/force-password-reset")
-      .set("Cookie", authCookie({ userId: 1, username: "jdoe", role: "teacher", schoolId: 10, mustResetPassword: true }))
+      .set("Cookie", await authCookie({ userId: 1, username: "jdoe", role: "teacher", schoolId: 10, mustResetPassword: true }))
       .send({ new_password: "NewPassw0rd!" });
 
     expect(res.status).toBe(200);
     expect(mockQuery).toHaveBeenLastCalledWith(
-      "UPDATE users SET password_hash = ?, must_reset_password = FALSE, token_version = ? WHERE id = ?",
+      "UPDATE users SET password_hash = $1, must_reset_password = FALSE, token_version = $2 WHERE id = $3",
       ["hashed-password", 6, 1]
     );
 
-    const token = res.headers["set-cookie"][0].split(";")[0].split("=")[1];
-    const decoded = jwt.decode(token) as any;
+    const token = res.headers.get("set-cookie")!.split(";")[0].split("=")[1];
+    const decoded = decode(token).payload as any;
     expect(decoded.tokenVersion).toBe(6);
     expect(decoded.mustResetPassword).toBe(false);
   });
@@ -737,11 +728,11 @@ describe("POST /api/auth/force-password-reset", () => {
     // path (/api/auth/force-password-reset), not some router-relative form.
     mockQuery
       .mockResolvedValueOnce(rows([{ token_version: 0 }]))
-      .mockResolvedValueOnce(rows({}));
+      .mockResolvedValueOnce(rows([]));
 
     const res = await request(app)
       .post("/api/auth/force-password-reset")
-      .set("Cookie", authCookie({ userId: 1, role: "teacher", schoolId: 10, mustResetPassword: true }))
+      .set("Cookie", await authCookie({ userId: 1, role: "teacher", schoolId: 10, mustResetPassword: true }))
       .send({ new_password: "NewPassw0rd!" });
 
     expect(res.status).not.toBe(403);
@@ -752,7 +743,7 @@ describe("must_reset_password blocks other routers, not just auth.ts", () => {
   it("403s a request to an unrelated router (admin.ts) when must_reset_password is true", async () => {
     const res = await request(app)
       .get("/api/admin/teachers")
-      .set("Cookie", authCookie({ userId: 1, role: "admin", schoolId: 10, mustResetPassword: true }));
+      .set("Cookie", await authCookie({ userId: 1, role: "admin", schoolId: 10, mustResetPassword: true }));
 
     expect(res.status).toBe(403);
     expect(res.body.code).toBe("PASSWORD_RESET_REQUIRED");

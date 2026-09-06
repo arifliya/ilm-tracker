@@ -55,6 +55,7 @@ interface ReportCard {
 }
 
 interface ScheduleSlot {
+  slot_id: number;
   slot_date: string;
   start_time: string;
   end_time: string;
@@ -68,6 +69,17 @@ interface ChildSchedule {
   student_id: number;
   child_name: string;
   slots: ScheduleSlot[];
+}
+
+interface NotificationItem {
+  id: number;
+  audience: "parent" | "staff";
+  title: string;
+  message: string;
+  created_at: string;
+  read_at: string | null;
+  sender_first_name: string;
+  sender_last_name: string;
 }
 
 type SectionKey = "dashboard" | "children" | "tasks" | "addChild" | "notifications" | "reportCards" | "directDebit";
@@ -120,7 +132,7 @@ const ParentDashboard: React.FC = () => {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
-  const [notifications, setNotifications] = useState<any[]>([]);
+  const [notifications, setNotifications] = useState<NotificationItem[]>([]);
 
   const updateNewChild = (field: string, value: string) => {
     setNewChild(prev => ({ ...prev, [field]: value }));
@@ -408,8 +420,8 @@ const ParentDashboard: React.FC = () => {
                                   <tbody>
                                     {[...childSlots]
                                       .sort((a, b) => a.slot_date.localeCompare(b.slot_date) || a.start_time.localeCompare(b.start_time))
-                                      .map((s, i) => (
-                                        <tr key={i}>
+                                      .map(s => (
+                                        <tr key={s.slot_id}>
                                           <td>{formatDate(s.slot_date)}</td>
                                           <td>
                                             {s.start_time.slice(0, 5)}–{s.end_time.slice(0, 5)}
@@ -639,7 +651,7 @@ const ParentDashboard: React.FC = () => {
             <p style={styles.text}>You have no notifications yet.</p>
           ) : (
             <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-              {notifications.map((n: any) => {
+              {notifications.map(n => {
                 const isUnread = !n.read_at;
                 return (
                   <div

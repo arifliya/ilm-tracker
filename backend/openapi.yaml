@@ -1,6 +1,6 @@
 openapi: 3.0.3
 info:
-  title: Ilm School Portal API
+  title: Ilm Tracker API
   version: 1.0.0
   description: |-
     Multi-school (multi-tenant) school management API. Every role except
@@ -34,17 +34,21 @@ info:
     message when the flag is off for the caller's school. See
     `GET /features` to check flag state.
 
-    **Rate limits**: `POST /auth/login` and `POST /auth/change-password`
-    each allow 10 requests per 15 minutes per IP; `POST /auth/check-duplicate`,
+    **Rate limits**: `POST /auth/login`, `POST /auth/change-password`, and
+    `POST /auth/force-password-reset` each allow 10 requests per 15 minutes
+    per IP (the latter two share the same bucket); `POST /auth/check-duplicate`,
     `POST /auth/register-parent`, and `POST /auth/register-staff` share a
-    combined 30 requests per hour per IP, as does
-    `POST /admin/users/{id}/reset-password`. All return `429` with
-    `{ "message": "..." }` once exceeded.
+    combined 30 requests per hour per IP, as do
+    `POST /admin/users/{id}/reset-password` and
+    `POST /admin/students/{id}/generate-login` (also sharing one bucket).
+    All return `429` with `{ "message": "..." }` once exceeded.
   contact:
-    name: Ilm School Portal
+    name: Ilm Tracker
 servers:
-  - url: 'http://localhost:4000/api'
-    description: Local dev (docker-compose)
+  - url: 'http://localhost:8787/api'
+    description: Local dev (wrangler dev)
+  - url: 'https://REPLACE-WITH-WORKER-SUBDOMAIN.workers.dev/api'
+    description: Deployed Cloudflare Worker (fill in after first `wrangler deploy`)
   - url: /api
     description: Relative to whatever origin is serving the frontend
 security:
@@ -559,6 +563,63 @@ paths:
         '429':
           $ref: '#/components/responses/RateLimited'
       operationId: postAuthChangePassword
+  /auth/force-password-reset:
+    post:
+      tags:
+        - Auth
+      summary: Complete a forced password reset
+      description: |-
+        The one route reachable (alongside `/auth/me` and `/auth/logout`)
+        while the session's `mustResetPassword` claim is blocking every
+        other endpoint with a `403 PASSWORD_RESET_REQUIRED` — see the
+        top-level description. Set on an account whenever an admin/owner/
+        system_admin resets its password, or a new student login is
+        provisioned (`/admin/approve/{id}`, `/admin/students/bulk-upload`,
+        `/admin/students/{id}/generate-login`). No `current_password` is
+        asked for — the caller already proved they hold it by logging in
+        with it, and it's meant to be single-use. Deliberately **not**
+        gated by the `password_management` feature flag like
+        `/auth/change-password` is: this is the one way out of the
+        forced-reset state, and blocking it on a flag that could be
+        toggled off after the reset already happened would strand the
+        user with no escape route. Clears `mustResetPassword`, bumps
+        `token_version`, and re-issues a fresh cookie.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - new_password
+              properties:
+                new_password:
+                  type: string
+      responses:
+        '200':
+          description: Password updated — sets a fresh httpOnly `token` cookie with mustResetPassword cleared
+          headers:
+            Set-Cookie:
+              schema:
+                type: string
+                example: token=eyJ...; HttpOnly; SameSite=Lax
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '400':
+          description: No reset pending for this account, or new_password does not meet the strength requirement
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+      operationId: postAuthForcePasswordReset
   /admin/classes:
     get:
       tags:
@@ -893,6 +954,10 @@ paths:
                       type: integer
                     student_school_id:
                       type: integer
+                    student_user_id:
+                      type: integer
+                      nullable: true
+                      description: 'Null if this student has no login yet — see POST /admin/students/{id}/generate-login.'
                     student_guardian_code:
                       type: string
                     class_id:
@@ -1042,6 +1107,14 @@ paths:
         grant system_admin. system_admin cannot approve a *parent*
         registration — that stays with the school's own admin/owner —
         but can approve staff across any school.
+
+        Approving a `parent` also provisions a login for any of that
+        parent's guardian-linked children who don't have one yet (first-time
+        registration, or a second guardian just approved onto an
+        already-enrolled sibling) — gated by the `password_management`
+        feature flag for the target school. Each provisioned account is
+        returned once in `studentAccounts`, same "relay it out of band, it
+        won't be shown again" contract as `/admin/users/{id}/reset-password`.
       parameters:
         - name: id
           in: path
@@ -1061,7 +1134,29 @@ paths:
                   example: teacher
       responses:
         '200':
-          $ref: '#/components/responses/MessageOk'
+          description: User approved
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: User approved
+                  studentAccounts:
+                    type: array
+                    description: 'Empty unless role was ''parent'' and at least one linked child was newly provisioned a login.'
+                    items:
+                      type: object
+                      properties:
+                        studentId:
+                          type: integer
+                        name:
+                          type: string
+                        username:
+                          type: string
+                        temporaryPassword:
+                          type: string
         '400':
           description: Missing/invalid role
           content:
@@ -1144,6 +1239,62 @@ paths:
         '429':
           $ref: '#/components/responses/RateLimited'
       operationId: postAdminUsersResetPasswordById
+  '/admin/students/{id}/generate-login':
+    post:
+      tags:
+        - Admin
+      summary: Generate a login for a student who doesn't have one yet
+      description: |-
+        Roles: admin, owner, system_admin. Backfill for students enrolled
+        before login provisioning existed, and a manual fallback if
+        auto-provisioning was skipped (e.g. the `password_management` flag
+        was off at approval/bulk-upload time). Gated by the
+        `password_management` feature flag, checked against the student's
+        school. 400s if the student already has a login — use
+        `/admin/users/{id}/reset-password` for that instead. Generates a
+        collision-safe username (`First Surname`, `First Surname 2`, ...)
+        and a one-time temporary password, returned once — this app sends
+        no email, so the caller must relay it out of band. The account
+        starts with `mustResetPassword` set, same as an admin-triggered
+        reset.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Login created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: Login created
+                  username:
+                    type: string
+                  temporaryPassword:
+                    type: string
+        '400':
+          description: Student already has a login
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Not admin/owner/system_admin, or the feature is disabled for this school
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+      operationId: postAdminStudentsGenerateLoginById
   '/admin/remove-student/{id}':
     delete:
       tags:
@@ -1694,9 +1845,11 @@ paths:
         password-reset/email flow, so a newly-created parent's one-time
         password is generated server-side and returned in that row's
         result for the admin to relay out of band; it is never stored
-        anywhere but its hash. Each row is processed in its own
-        transaction, so one bad row does not affect the others. Max 500
-        rows per request.
+        anywhere but its hash. Each successfully-created student also gets
+        a login provisioned the same way (collision-safe username, one-time
+        password), gated by the `password_management` feature flag for the
+        caller's school. Each row is processed in its own transaction, so
+        one bad row does not affect the others. Max 500 rows per request.
       requestBody:
         required: true
         content:
@@ -1817,6 +1970,12 @@ paths:
                         temporaryPassword:
                           type: string
                           description: Only present when parentCreated is true — relay to the parent out of band, shown once
+                        studentUsername:
+                          type: string
+                          description: Only present when the student's login was provisioned (password_management enabled for the school)
+                        studentTemporaryPassword:
+                          type: string
+                          description: Only present alongside studentUsername — relay to the family out of band, shown once
         '400':
           description: No rows submitted, or more than 500 rows
           content:

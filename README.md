@@ -1,4 +1,4 @@
-# ilm-school-portal
+# Ilm Tracker
 
 A multi-tenant school management portal: parents, teachers, and school
 staff each get a role-scoped dashboard for attendance, tasks,
@@ -7,13 +7,22 @@ role for onboarding new schools and managing feature rollout.
 
 ## Stack
 
-- **Backend** (`backend/`) — Express + TypeScript API, MySQL
-  (`mysql2`), JWT session cookies. See [`backend/README.md`](backend/README.md).
-- **Frontend** (`frontend/`) — React + TypeScript SPA (Vite), served by
-  nginx in production. See [`frontend/README.md`](frontend/README.md).
-- **Database** — MySQL, schema managed by Liquibase (below).
-- **Orchestration** — `docker-compose.yml` runs MySQL, a one-shot
-  Liquibase migration step, the backend, and the frontend together.
+- **Backend** (`backend/`) — Hono + TypeScript API running on
+  **Cloudflare Workers**, Postgres via **Neon**'s serverless driver
+  (`@neondatabase/serverless`, one connection per request — see
+  `config/db.ts`), JWT session cookies (`hono/jwt`). See
+  [`backend/README.md`](backend/README.md).
+- **Frontend** (`frontend/`) — React + TypeScript SPA (Vite), deployed
+  to **Cloudflare Pages**. See [`frontend/README.md`](frontend/README.md).
+- **Database** — Postgres, hosted on **Neon** (see `DEPLOY_RUNBOOK.md`),
+  schema managed by Liquibase (below). A local Postgres for dev runs via
+  Docker, reached the same WebSocket way a real Neon host is via a small
+  local proxy (`wsproxy`, also in `docker-compose.yml`) — see
+  `backend/README.md`'s local-dev section for why.
+- **Local orchestration** — `docker-compose.yml` runs local Postgres,
+  `wsproxy`, and a one-shot Liquibase migration step now; the backend runs
+  via `wrangler dev` and the frontend via `vite dev`, neither of which are
+  Docker containers.
 
 ## Roles
 
@@ -26,57 +35,62 @@ school code (and, for parents, a class code per child), and
 
 ## Running it locally
 
+Three pieces, run separately (no single `docker compose up` brings up the
+whole stack anymore — Workers/Pages aren't containers):
+
 ```
 cp .env.example .env    # fill in real secrets, see inline comments
-docker compose up -d --build
+docker compose up -d    # Postgres + wsproxy + a one-shot Liquibase migration step
 ```
 
-This brings up MySQL, applies pending Liquibase migrations, then starts
-the backend (`http://localhost:4000`) and frontend
-(`http://localhost:5173`). Load demo data once the stack is healthy with
-`./scripts/seed-db.sh`. For day-to-day backend/frontend development
-(hot reload, running each independently) see their own READMEs linked
-above.
+```
+cd backend
+cp .dev.vars.example .dev.vars   # fill in real secrets
+# DATABASE_URL should point at the "db" host (the docker-compose service
+# name, not "localhost") with your .env's POSTGRES_PASSWORD:
+# postgres://ilmuser:<password>@db:5432/ilm — config/db.ts detects that
+# host and routes the connection through the local wsproxy container
+# instead of assuming a real Neon host. This is a local-only edit, don't
+# commit real credentials.
+npm run dev              # wrangler dev, http://localhost:8787
+```
+
+```
+cd frontend
+npm run dev               # vite dev, http://localhost:5173
+```
+
+Load demo data once Postgres is healthy and migrations have run:
+`./scripts/seed-db.sh`. For day-to-day development details see the
+backend/frontend READMEs linked above.
 
 ## Environments: dev vs. production
 
-The base `docker-compose.yml` is dev-shaped on purpose — it publishes
-MySQL's port to the host so you can connect a local DB client directly,
-and the `.env.example` files default to insecure placeholder values
-(`COOKIE_SECURE=false`, `CORS_ORIGIN=http://localhost:5173`, etc.) that
-are correct for local dev and wrong for anything reachable over the
-internet.
+Local dev (above) runs against Docker Postgres with no TLS, `COOKIE_SECURE`
+effectively off, and a same-site `localhost` frontend/backend pair — none
+of that applies once deployed.
 
-For a real deployment:
+For a real deployment: the backend deploys to Cloudflare Workers
+(`wrangler deploy`) and the frontend to Cloudflare Pages (git-integrated,
+or `wrangler pages deploy`). Neither uses this repo's `docker-compose.yml`
+— that file is local-dev-only now. The database is a Neon project you
+provision separately (Neon is where the data lives — there's no
+Hyperdrive-style intermediary), its connection string set as the
+`DATABASE_URL` secret. Secrets (`DATABASE_URL`, `JWT_SECRET`,
+`DIRECT_DEBIT_WEBHOOK_SECRET`) are all set with
+`wrangler secret put <NAME>`, never committed.
 
-```
-cp .env.production.example .env
-cp backend/.env.production.example backend/.env
-# fill in real secrets — see the comments in each file, every value
-# marked "changeme" must actually change
-./scripts/deploy-prod.sh up -d --build
-```
+**No custom domain yet**: deploying on the default `*.pages.dev` /
+`*.workers.dev` subdomains means the frontend and backend are on different
+*sites* (not just different origins) as far as cookies are concerned, so
+the session cookie uses `SameSite=None; Secure` rather than the tighter
+`SameSite=Lax` a same-site custom-domain setup would allow — see
+`backend/src/utils/token.ts`. Revisit this once both sit on subdomains of
+the same domain.
 
-`docker-compose.prod.yml` is an overlay (not a standalone file — it does
-nothing applied on its own) that stops MySQL's port from being published
-to the host, since in production the database should only be reachable
-from other containers on the compose network.
-`./scripts/deploy-prod.sh` always applies it together with the base file
-(equivalent to `docker compose -f docker-compose.yml -f
-docker-compose.prod.yml`, passing through whatever arguments you give it —
-`up -d --build`, `down`, `run --rm liquibase status`, ...) so the overlay
-can't be forgotten by typing the plain `docker compose` command out of
-habit. The `.env.production.example` files call out every value that must differ
-from the dev defaults — most importantly `COOKIE_SECURE=true` and a real
-`CORS_ORIGIN`, without which sessions either won't be sent over HTTPS or
-will be rejected by the browser entirely. Requires Docker Compose v2.24+
-(for the `!override` merge tag the overlay relies on to actually replace
-the base file's port publish, rather than just appending to it) — check
-with `docker compose version`.
-
-This repo has no reverse proxy or TLS termination of its own — that (and
-a database backup strategy) is expected to live at whatever layer
-actually terminates HTTPS in front of these containers.
+This repo has no database backup strategy of its own beyond what Neon
+provides automatically (point-in-time recovery, branching) — see
+`DEPLOY_RUNBOOK.md` for the retention caveats.
 
 For the full operational sequence — routine deploys, applying/rolling back
 migrations, rotating secrets, and troubleshooting — see
@@ -100,10 +114,14 @@ so it's maintained by hand alongside the route files.
 ## Database migrations (Liquibase)
 
 Schema changes are managed by Liquibase, not by hand-editing a bootstrap
-SQL file. `docker compose up` runs a one-shot `liquibase` service that
-applies any changesets in `liquibase/changelog/` that haven't run yet
-against the `db` service, before `backend` starts. It only ever touches
-schema — it never inserts, updates, or deletes application data.
+SQL file. Locally, `docker compose up` runs a one-shot `liquibase` service
+that applies any changesets in `liquibase/changelog/` that haven't run yet
+against the local `db` service. It only ever touches schema — it never
+inserts, updates, or deletes application data.
+
+Production migrations run the same Liquibase image/changelog against your
+Neon database — see `DEPLOY_RUNBOOK.md` for the exact command (there's no
+`db` container in production to depend on).
 
 - **Adding a schema change**: create a new file
   `liquibase/changelog/NNN-short-description.sql` (next number after the

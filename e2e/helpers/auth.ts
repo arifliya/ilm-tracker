@@ -1,7 +1,19 @@
 import { Page, expect } from "@playwright/test";
 
-/** Every seeded account in mysql/seed.sql shares this dev password. */
-export const SEED_PASSWORD = "Passw0rd!";
+/**
+ * Every seeded account in mysql/seed.sql shares this dev password — read
+ * from E2E_SEED_PASSWORD (e2e/.env) only, never hardcoded here. Even
+ * though the local value is a well-known dev default, keeping it out of
+ * source means there's exactly one place (e2e/.env, git-ignored) that
+ * ever holds a real credential, local or remote alike — see
+ * e2e/.env.example for what to set it to.
+ */
+if (!process.env.E2E_SEED_PASSWORD) {
+  throw new Error(
+    "E2E_SEED_PASSWORD is not set. Copy e2e/.env.example to e2e/.env first — see that file for what to set it to."
+  );
+}
+export const SEED_PASSWORD = process.env.E2E_SEED_PASSWORD;
 
 export async function visitLoginPage(page: Page): Promise<void> {
   await page.goto("/login");

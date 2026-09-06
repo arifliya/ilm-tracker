@@ -4,27 +4,36 @@ jest.mock("../../utils/featureFlags", () => ({
 }));
 
 import crypto from "crypto";
-import request from "supertest";
-import { app } from "../../app";
-import { pool } from "../../config/db";
+import app from "../../app";
 import { rows } from "../helpers/db";
 import { authCookie } from "../helpers/auth";
+import { request } from "../helpers/request";
 import { isFeatureEnabled } from "../../utils/featureFlags";
+import { testEnv } from "../helpers/testEnv";
 
 const signWebhook = (payload: object) =>
   crypto
-    .createHmac("sha256", process.env.DIRECT_DEBIT_WEBHOOK_SECRET as string)
+    .createHmac("sha256", testEnv.DIRECT_DEBIT_WEBHOOK_SECRET)
     .update(JSON.stringify(payload))
     .digest("hex");
 
-const mockQuery = pool.query as jest.Mock;
+const { mockDb } = jest.requireMock<typeof import("../../config/__mocks__/db")>("../../config/db");
+const mockQuery = mockDb.query as jest.Mock;
 const mockIsFeatureEnabled = isFeatureEnabled as jest.Mock;
 
-const adminCookie = authCookie({ userId: 1, role: "admin", schoolId: 10 });
-const treasurerCookie = authCookie({ userId: 2, role: "treasurer", schoolId: 10 });
-const teacherCookie = authCookie({ userId: 3, role: "teacher", schoolId: 10 });
-const parentCookie = authCookie({ userId: 4, role: "parent", schoolId: 10 });
-const ownerCookie = authCookie({ userId: 5, role: "owner", schoolId: 10 });
+let adminCookie: string;
+let treasurerCookie: string;
+let teacherCookie: string;
+let parentCookie: string;
+let ownerCookie: string;
+
+beforeAll(async () => {
+  adminCookie = await authCookie({ userId: 1, role: "admin", schoolId: 10 });
+  treasurerCookie = await authCookie({ userId: 2, role: "treasurer", schoolId: 10 });
+  teacherCookie = await authCookie({ userId: 3, role: "teacher", schoolId: 10 });
+  parentCookie = await authCookie({ userId: 4, role: "parent", schoolId: 10 });
+  ownerCookie = await authCookie({ userId: 5, role: "owner", schoolId: 10 });
+});
 
 describe("GET /api/fees/fee-periods", () => {
   it("403s for owner (deliberately excluded, unlike every other admin capability)", async () => {
@@ -75,7 +84,7 @@ describe("POST /api/fees/fee-periods", () => {
 
   it("409s on a duplicate period name for the school", async () => {
     mockIsFeatureEnabled.mockResolvedValueOnce(true);
-    mockQuery.mockRejectedValueOnce({ code: "ER_DUP_ENTRY" });
+    mockQuery.mockRejectedValueOnce({ code: "23505" });
     const res = await request(app)
       .post("/api/fees/fee-periods")
       .set("Cookie", adminCookie)
@@ -85,7 +94,7 @@ describe("POST /api/fees/fee-periods", () => {
 
   it("creates a fee period", async () => {
     mockIsFeatureEnabled.mockResolvedValueOnce(true);
-    mockQuery.mockResolvedValueOnce([{ insertId: 7 }]);
+    mockQuery.mockResolvedValueOnce(rows([{ id: 7 }]));
     const res = await request(app)
       .post("/api/fees/fee-periods")
       .set("Cookie", treasurerCookie)
@@ -193,7 +202,7 @@ describe("POST /api/fees/fee-periods/:id/generate", () => {
         ])
       ) // membershipRows
       .mockResolvedValueOnce(rows([])) // no pre-existing rows
-      .mockResolvedValueOnce([{ affectedRows: 2 }]); // insert
+      .mockResolvedValueOnce({ rows: [], rowCount: 2 }); // insert
     // "direct_debit" flag falls back to the mock's default (undefined ->
     // falsy), so the auto-submit branch is skipped without further mocks.
 
@@ -212,7 +221,7 @@ describe("POST /api/fees/fee-periods/:id/generate", () => {
     expect(res.body.submittedForCollection).toBe(0);
     expect(mockQuery).toHaveBeenNthCalledWith(
       5,
-      expect.stringContaining("ON DUPLICATE KEY UPDATE amount = amount"),
+      expect.stringContaining("ON CONFLICT (student_id, fee_period_id) DO NOTHING"),
       [5, 1, 40, 6, 1, 100]
     );
   });
@@ -239,7 +248,7 @@ describe("POST /api/fees/fee-periods/:id/generate", () => {
       .mockResolvedValueOnce(rows([{ id: 1 }]))
       .mockResolvedValueOnce(rows([{ student_id: 5, class_id: 1 }]))
       .mockResolvedValueOnce(rows([{ student_id: 5 }])) // already has a row
-      .mockResolvedValueOnce([{ affectedRows: 0 }]);
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 });
     const res = await request(app)
       .post("/api/fees/fee-periods/1/generate")
       .set("Cookie", adminCookie)
@@ -257,10 +266,10 @@ describe("POST /api/fees/fee-periods/:id/generate", () => {
       .mockResolvedValueOnce(rows([{ id: 1 }])) // valid classes
       .mockResolvedValueOnce(rows([{ student_id: 1, class_id: 1 }])) // membershipRows
       .mockResolvedValueOnce(rows([])) // no pre-existing rows — student 1 is brand new
-      .mockResolvedValueOnce([{ affectedRows: 1 }]) // insert
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 }) // insert
       .mockResolvedValueOnce(rows([{ id: 99, student_id: 1, amount: "100.00" }])) // newRows (unpaid, this period)
       .mockResolvedValueOnce(rows([{ provider_mandate_id: "stub_mandate_abc" }])) // findActiveMandateForStudent
-      .mockResolvedValueOnce(rows({})); // UPDATE ... pending_collection
+      .mockResolvedValueOnce(rows([])); // UPDATE ... pending_collection
 
     const res = await request(app)
       .post("/api/fees/fee-periods/1/generate")
@@ -282,7 +291,7 @@ describe("POST /api/fees/fee-periods/:id/generate", () => {
       .mockResolvedValueOnce(rows([{ id: 1 }]))
       .mockResolvedValueOnce(rows([{ student_id: 1, class_id: 1 }]))
       .mockResolvedValueOnce(rows([]))
-      .mockResolvedValueOnce([{ affectedRows: 1 }])
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
       .mockResolvedValueOnce(rows([{ id: 99, student_id: 1, amount: "100.00" }]))
       .mockResolvedValueOnce(rows([])); // no active mandate found
 
@@ -315,7 +324,7 @@ describe("PUT /api/fees/fees/:feeId", () => {
     mockIsFeatureEnabled.mockResolvedValueOnce(true);
     mockQuery
       .mockResolvedValueOnce(rows([{ id: 50, student_id: 1, fee_period_id: 1, amount: "100.00", status: "unpaid" }]))
-      .mockResolvedValueOnce(rows({}));
+      .mockResolvedValueOnce(rows([]));
     const res = await request(app).put("/api/fees/fees/50").set("Cookie", treasurerCookie).send({ amount: 120 });
     expect(res.status).toBe(200);
   });
@@ -333,7 +342,7 @@ describe("POST /api/fees/fees/:feeId/mark-paid", () => {
     mockIsFeatureEnabled.mockResolvedValueOnce(true);
     mockQuery
       .mockResolvedValueOnce(rows([{ id: 50, student_id: 1, fee_period_id: 1, amount: "100.00", status: "unpaid" }]))
-      .mockResolvedValueOnce(rows({}));
+      .mockResolvedValueOnce(rows([]));
     const res = await request(app).post("/api/fees/fees/50/mark-paid").set("Cookie", treasurerCookie);
     expect(res.status).toBe(200);
     expect(mockQuery).toHaveBeenLastCalledWith(expect.stringContaining("status = 'paid'"), [2, 50]);
@@ -352,7 +361,7 @@ describe("POST /api/fees/fees/:feeId/mark-unpaid", () => {
     mockIsFeatureEnabled.mockResolvedValueOnce(true);
     mockQuery
       .mockResolvedValueOnce(rows([{ id: 50, student_id: 1, fee_period_id: 1, amount: "100.00", status: "paid" }]))
-      .mockResolvedValueOnce(rows({}));
+      .mockResolvedValueOnce(rows([]));
     const res = await request(app).post("/api/fees/fees/50/mark-unpaid").set("Cookie", adminCookie);
     expect(res.status).toBe(200);
     expect(mockQuery).toHaveBeenLastCalledWith(expect.stringContaining("status = 'unpaid'"), [50]);
@@ -364,7 +373,7 @@ describe("POST /api/fees/fees/:feeId/mark-unpaid", () => {
       .mockResolvedValueOnce(
         rows([{ id: 50, student_id: 1, fee_period_id: 1, amount: "100.00", status: "failed", payment_method: "direct_debit", provider_payment_id: "stub_pay_50_x", failure_reason: "Insufficient funds" }])
       )
-      .mockResolvedValueOnce(rows({}));
+      .mockResolvedValueOnce(rows([]));
     const res = await request(app).post("/api/fees/fees/50/mark-unpaid").set("Cookie", adminCookie);
     expect(res.status).toBe(200);
     expect(mockQuery).toHaveBeenLastCalledWith(expect.stringContaining("payment_method = 'manual'"), [50]);
@@ -419,7 +428,7 @@ describe("POST /api/fees/fees/:feeId/simulate-collection", () => {
     mockIsFeatureEnabled.mockResolvedValueOnce(true);
     mockQuery
       .mockResolvedValueOnce(rows([{ id: 50, student_id: 1, fee_period_id: 1, amount: "100.00", status: "pending_collection" }]))
-      .mockResolvedValueOnce(rows({}));
+      .mockResolvedValueOnce(rows([]));
     const res = await request(app)
       .post("/api/fees/fees/50/simulate-collection")
       .set("Cookie", treasurerCookie)
@@ -432,7 +441,7 @@ describe("POST /api/fees/fees/:feeId/simulate-collection", () => {
     mockIsFeatureEnabled.mockResolvedValueOnce(true);
     mockQuery
       .mockResolvedValueOnce(rows([{ id: 50, student_id: 1, fee_period_id: 1, amount: "100.00", status: "pending_collection" }]))
-      .mockResolvedValueOnce(rows({}));
+      .mockResolvedValueOnce(rows([]));
     const res = await request(app)
       .post("/api/fees/fees/50/simulate-collection")
       .set("Cookie", treasurerCookie)
@@ -482,7 +491,7 @@ describe("POST /api/fees/webhooks/direct-debit", () => {
     const payload = { provider_payment_id: "stub_pay_99_abc", event: "paid" };
     mockQuery
       .mockResolvedValueOnce(rows([{ id: 99, status: "pending_collection" }]))
-      .mockResolvedValueOnce(rows({}));
+      .mockResolvedValueOnce(rows([]));
     const res = await request(app)
       .post("/api/fees/webhooks/direct-debit")
       .set("X-Signature", signWebhook(payload))

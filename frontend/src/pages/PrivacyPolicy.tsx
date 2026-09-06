@@ -15,7 +15,7 @@ const PrivacyPolicy: React.FC = () => {
         <p style={{ ...styles.text, color: "#666" }}>Last updated: 17 August 2026</p>
 
         <p style={styles.text}>
-          ilm School Portal ("we", "us", "the school") is committed to protecting the
+          Ilm Tracker ("we", "us", "the school") is committed to protecting the
           privacy of students, parents, staff, and other users of this platform. This
           policy explains what information we collect, why we collect it, and how it is
           used and protected.

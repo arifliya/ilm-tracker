@@ -5,7 +5,6 @@ import BaseDashboard, { DashboardNavItem } from "../../components/BaseDashboard"
 import SearchSort from "../../components/SearchSort";
 import Pagination from "../../components/Pagination";
 import { useConfirm } from "../../components/ConfirmDialog";
-import { sortData, paginate } from "../../utils/tableHelpers";
 import { getErrorMessage } from "../../utils/getErrorMessage";
 import { formatDate } from "../../utils/formatDate";
 import { usePolling } from "../../hooks/usePolling";
@@ -33,8 +32,44 @@ interface RoleItem {
   name: string;
 }
 
+interface UserStudentInfo {
+  first_name: string;
+  surname: string;
+  address1: string;
+}
+
+interface UserItem {
+  id: number;
+  username: string;
+  first_name: string | null;
+  middle_name: string | null;
+  last_name: string | null;
+  date_of_birth: string | null;
+  address1: string | null;
+  address2: string | null;
+  address3: string | null;
+  city: string | null;
+  postcode: string | null;
+  medical_condition: string | null;
+  disability: string | null;
+  email: string | null;
+  role: string;
+  students?: UserStudentInfo[];
+}
+
+interface NotificationItem {
+  id: number;
+  title: string;
+  message: string;
+  created_at: string;
+  read_at: string | null;
+  sender_first_name: string;
+  sender_last_name: string;
+}
+
 const MaintainerDashboard: React.FC = () => {
-  const [users, setUsers] = useState<any[]>([]);
+  const [users, setUsers] = useState<UserItem[]>([]);
+  const [totalUsers, setTotalUsers] = useState(0);
   const [roles, setRoles] = useState<RoleItem[]>([]);
   const [searchUsers, setSearchUsers] = useState("");
   const [sortUsers, setSortUsers] = useState("az");
@@ -52,20 +87,18 @@ const MaintainerDashboard: React.FC = () => {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
-  const [myNotifications, setMyNotifications] = useState<any[]>([]);
+  const [myNotifications, setMyNotifications] = useState<NotificationItem[]>([]);
   const [features, setFeatures] = useState<Record<string, boolean>>({});
 
   const { confirm, ConfirmDialog } = useConfirm();
 
   const loadAll = async () => {
     try {
-      const [usersRes, rolesRes, myNotificationsRes, featuresRes] = await Promise.all([
-        api.get("/admin/users-all"),
+      const [rolesRes, myNotificationsRes, featuresRes] = await Promise.all([
         api.get("/admin/roles"),
         api.get("/notifications"),
         api.get("/features")
       ]);
-      setUsers(usersRes.data);
       setRoles(rolesRes.data || []);
       setMyNotifications(myNotificationsRes.data || []);
       setFeatures(featuresRes.data?.flags || {});
@@ -76,18 +109,46 @@ const MaintainerDashboard: React.FC = () => {
     }
   };
 
+  // Paginated/searched/sorted server-side now (was: fetch the whole users
+  // table and slice it client-side) — a separate load function, and a
+  // separate effect keyed on the params that should re-fetch, rather than
+  // folded into loadAll: loadAll's own callers (mount, polling) don't know
+  // about page/search/sort, and re-running the *other* three requests
+  // every time the user types a search character would be wasteful.
+  const loadUsers = async () => {
+    try {
+      const res = await api.get("/admin/users-all", {
+        params: { page: pageUsers, pageSize: PAGE_SIZE, search: searchUsers, sort: sortUsers }
+      });
+      setUsers(res.data.users || []);
+      setTotalUsers(res.data.total || 0);
+      setLoadError(null);
+    } catch (err) {
+      console.error("Failed to load users", err);
+      setLoadError(getErrorMessage(err, "Failed to load users."));
+    }
+  };
+
   useEffect(() => {
     loadAll();
   }, []);
 
-  usePolling(loadAll, POLL_INTERVAL_MS);
+  useEffect(() => {
+    loadUsers();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pageUsers, searchUsers, sortUsers]);
+
+  usePolling(() => {
+    loadAll();
+    loadUsers();
+  }, POLL_INTERVAL_MS);
 
   const deleteUser = async (userId: number) => {
     if (!(await confirm("Are you sure you want to delete this user?"))) return;
 
     try {
       await api.delete(`/admin/users/${userId}`);
-      loadAll();
+      loadUsers();
       setSuccessMessage("User deleted successfully.");
     } catch (err) {
       console.error("User delete error:", err);
@@ -95,7 +156,6 @@ const MaintainerDashboard: React.FC = () => {
     }
   };
 
-  const totalUsers = users.length;
   const totalRoles = roles.length;
 
   const saveDetails = async (id: number, role: string) => {
@@ -104,7 +164,7 @@ const MaintainerDashboard: React.FC = () => {
         ...editData[id],
         role
       });
-      loadAll();
+      loadUsers();
       setSuccessMessage("User details saved successfully.");
     } catch (err) {
       console.error("Save details error:", err);
@@ -223,19 +283,7 @@ const MaintainerDashboard: React.FC = () => {
             </thead>
 
             <tbody>
-              {paginate(
-                sortData(
-                  users.filter((u: any) =>
-                    u.username
-                      .toLowerCase()
-                      .includes(searchUsers.toLowerCase())
-                  ),
-                  "username",
-                  sortUsers
-                ),
-                pageUsers,
-                PAGE_SIZE
-              ).map((u: any) => (
+              {users.map((u) => (
                 <React.Fragment key={u.id}>
                   {/* MAIN ROW */}
                   <tr>
@@ -523,13 +571,13 @@ const MaintainerDashboard: React.FC = () => {
                         {/* STUDENT CARDS — PARENT ONLY & ONLY REAL STUDENTS */}
                         {u.role === "parent" &&
                           Array.isArray(u.students) &&
-                          u.students.some((s: any) => s && s.first_name) && (
+                          u.students.some((s) => s && s.first_name) && (
                             <div style={{ marginTop: 30 }}>
                               <h3 style={{ marginBottom: 12 }}>Student(s)</h3>
 
                               {u.students
-                                .filter((s: any) => s && s.first_name)
-                                .map((s: any, idx: number) => (
+                                .filter((s) => s && s.first_name)
+                                .map((s, idx: number) => (
                                   <div
                                     key={idx}
                                     style={{
@@ -576,13 +624,7 @@ const MaintainerDashboard: React.FC = () => {
             page={pageUsers}
             setPage={setPageUsers}
             pageSize={PAGE_SIZE}
-            total={
-              users.filter((u: any) =>
-                u.username
-                  .toLowerCase()
-                  .includes(searchUsers.toLowerCase())
-              ).length
-            }
+            total={totalUsers}
           />
         </div>
       )}
@@ -675,7 +717,7 @@ const MaintainerDashboard: React.FC = () => {
             <p style={styles.text}>You have no notifications yet.</p>
           ) : (
             <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-              {myNotifications.map((n: any) => {
+              {myNotifications.map((n) => {
                 const isUnread = !n.read_at;
                 return (
                   <div

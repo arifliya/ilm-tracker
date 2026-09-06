@@ -11,7 +11,7 @@
 -- ============================
 
 CREATE TABLE parent_contact_view_log (
-  id INT AUTO_INCREMENT PRIMARY KEY,
+  id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   teacher_user_id INT NULL,
   student_id INT NULL,
   class_id INT NULL,
@@ -20,10 +20,11 @@ CREATE TABLE parent_contact_view_log (
   FOREIGN KEY (teacher_user_id) REFERENCES users(id) ON DELETE SET NULL,
   FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE SET NULL,
   FOREIGN KEY (class_id) REFERENCES classes(id) ON DELETE SET NULL,
-  FOREIGN KEY (school_id) REFERENCES schools(id) ON DELETE SET NULL,
-  INDEX idx_pcvl_student (student_id),
-  INDEX idx_pcvl_teacher (teacher_user_id),
-  INDEX idx_pcvl_viewed_at (viewed_at)
+  FOREIGN KEY (school_id) REFERENCES schools(id) ON DELETE SET NULL
 );
+
+CREATE INDEX idx_pcvl_student ON parent_contact_view_log (student_id);
+CREATE INDEX idx_pcvl_teacher ON parent_contact_view_log (teacher_user_id);
+CREATE INDEX idx_pcvl_viewed_at ON parent_contact_view_log (viewed_at);
 
 --rollback DROP TABLE IF EXISTS parent_contact_view_log;

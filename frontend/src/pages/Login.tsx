@@ -36,7 +36,7 @@ const Login: React.FC = () => {
   return (
     <div style={styles.pageCentered}>
       <div style={styles.card}>
-        <h1 style={styles.title}>ilm School Portal</h1>
+        <h1 style={styles.title}>Ilm Tracker</h1>
         <h2 style={styles.subtitle}>Login</h2>
 
         <form onSubmit={handleSubmit} style={styles.form}>
