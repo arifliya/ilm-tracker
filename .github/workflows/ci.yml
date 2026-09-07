@@ -1,0 +1,105 @@
+name: CI
+
+# CI only — no deployment here (deploy.yml handles that, gated on a
+# published GitHub Release). This stops at "does it build and pass,"
+# matching what's actually run by hand before every change in this repo
+# today.
+#
+# push has no branch filter — every push, on every branch, gets this same
+# gate, not just main. Without that, a feature branch could accumulate
+# broken commits with no CI feedback until it's finally merged (or, for
+# this repo's usual direct-push workflow with no PR in between, CI simply
+# never ran at all). pull_request stays too, for the case where a change
+# does go through a PR — a push- and pull_request-triggered run can both
+# fire for the same commit on a branch with an open PR, which is
+# redundant but harmless; the concurrency group below at least cancels a
+# stale run of either kind once a newer one starts on the same ref.
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 26
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build
+      - run: npx @redocly/cli lint openapi.yaml
+      # High/critical only — moderate-and-below (mostly dev-tooling-only
+      # advisories) shouldn't block a merge on their own.
+      #
+      # Retried up to 3 times: npm's advisory bulk endpoint
+      # (registry.npmjs.org/-/npm/v1/security/advisories/bulk) times out
+      # on GitHub-hosted runners often enough to be a known flake, not a
+      # real finding — a bare `npm audit` failing the whole job on that
+      # basis would block merges for a network blip that has nothing to
+      # do with this change. A real high/critical finding fails all 3
+      # attempts identically (it's not a network-dependent result), so
+      # this doesn't mask anything the gate is actually meant to catch.
+      - name: npm audit (high/critical only, retried against registry timeouts)
+        run: |
+          for attempt in 1 2 3; do
+            npm audit --audit-level=high && exit 0
+            echo "npm audit attempt $attempt/3 failed — retrying in 10s (often a registry timeout, not a real finding)" >&2
+            sleep 10
+          done
+          echo "npm audit failed 3/3 times — treating as a real finding, not a flake." >&2
+          exit 1
+
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 26
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - run: npm ci
+      # vite build alone doesn't type-check (esbuild strips types without
+      # checking them) — tsc has to run separately to actually catch type
+      # errors, same as every manual verification pass in this repo.
+      - run: npx tsc --noEmit
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build
+      # Retried up to 3 times — see the backend job's identical step for
+      # why (npm's advisory bulk endpoint times out on GitHub-hosted
+      # runners often enough to be a known flake, not a real finding).
+      - name: npm audit (high/critical only, retried against registry timeouts)
+        run: |
+          for attempt in 1 2 3; do
+            npm audit --audit-level=high && exit 0
+            echo "npm audit attempt $attempt/3 failed — retrying in 10s (often a registry timeout, not a real finding)" >&2
+            sleep 10
+          done
+          echo "npm audit failed 3/3 times — treating as a real finding, not a flake." >&2
+          exit 1
+

@@ -1,0 +1,21 @@
+/*
+  # Mirrors what nginx.conf used to set (and what the backend already gets
+  # for free from helmet()) — Cloudflare Pages' _headers file is the
+  # equivalent mechanism here, applied to every response ("/*").
+  #
+  # connect-src is deliberately not locked to the exact Worker origin: this
+  # is a static file with no way to know the deployed API URL at build
+  # time. Once real custom domains exist (see wrangler.toml's CORS_ORIGIN
+  # placeholder), replace `https:` below with the exact API origin
+  # (e.g. https://api.example.com) for a tighter policy.
+  #
+  # style-src needs 'unsafe-inline' because this app uses React's
+  # style={{...}} inline styles throughout rather than CSS classes —
+  # tightening that would mean migrating every component's styling, not
+  # a header change.
+  X-Content-Type-Options: nosniff
+  X-Frame-Options: SAMEORIGIN
+  Referrer-Policy: no-referrer
+  Permissions-Policy: camera=(), microphone=(), geolocation=()
+  Strict-Transport-Security: max-age=15552000; includeSubDomains
+  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self' https: http://localhost:*; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'self'

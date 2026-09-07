@@ -1,0 +1,31 @@
+.DS_Store
+backend/.DS_Store
+frontend/.DS_Store
+frontend/src/.DS_Store
+frontend/dist/
+backend/dist/
+node_modules/
+mysql/init.backup
+.env*
+# .env.example files are templates meant to be committed, not real secrets
+# — without this, a *new* one (e.g. e2e/.env.example) would be silently
+# swallowed by .env* above and never show up as addable. The existing
+# root/backend/frontend .env.example files predate this rule and stay
+# tracked regardless (.gitignore only affects untracked files).
+!.env.example
+# Cloudflare Workers/Pages secrets — same spirit as .env* above, just
+# Wrangler's own file format/name for local dev (backend/.dev.vars).
+.dev.vars
+# Wrangler's local-dev state/cache dir (backend/.wrangler)
+.wrangler/
+e2e/test-results/
+e2e/playwright-report/
+# scripts/run-e2e.sh's backend/frontend dev-server output, captured at the
+# repo root since the servers are started from backend/ and frontend/
+# respectively (../backend-dev.log, ../frontend-dev.log).
+backend-dev.log
+frontend-dev.log
+docs/
+
+# Manual test fixture for the bulk student CSV upload — not for commit
+test-students-import.csv

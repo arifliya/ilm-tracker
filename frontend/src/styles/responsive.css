@@ -1,0 +1,104 @@
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+/* ---------------------- DASHBOARD SHELL ---------------------- */
+
+/* 100vh is unreliable on mobile Safari (counts space behind the address
+   bar). Fall back to vh for old browsers, upgrade to dvh where supported. */
+.dashboard-shell {
+  height: 100vh;
+  height: 100dvh;
+}
+
+.modal-overlay {
+  height: 100vh;
+  height: 100dvh;
+}
+
+.dashboard-body {
+  position: relative;
+}
+
+.dashboard-sidebar {
+  flex-shrink: 0;
+  transition: transform 0.25s ease;
+}
+
+.dashboard-menu-toggle {
+  display: none;
+}
+
+.dashboard-sidebar-overlay {
+  display: none;
+}
+
+@media (max-width: 768px) {
+  .dashboard-sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    z-index: 1000;
+    transform: translateX(-100%);
+  }
+
+  .dashboard-sidebar.open {
+    transform: translateX(0);
+  }
+
+  .dashboard-content {
+    padding: 16px !important;
+  }
+
+  .dashboard-menu-toggle {
+    display: inline-flex;
+  }
+
+  .dashboard-sidebar-overlay.open {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.4);
+    z-index: 999;
+  }
+
+  .navbar-title {
+    display: none;
+  }
+}
+
+@media (max-width: 480px) {
+  .navbar-username {
+    display: none;
+  }
+}
+
+/* ---------------------- FORM ROWS (Register) ---------------------- */
+
+@media (max-width: 640px) {
+  .form-row {
+    flex-direction: column !important;
+    align-items: flex-start !important;
+    gap: 6px !important;
+  }
+
+  .form-row-label {
+    width: 100% !important;
+    white-space: normal !important;
+  }
+}
+
+/* ---------------------- TWO-COLUMN EDIT GRID (Maintainer) ---------------------- */
+
+@media (max-width: 640px) {
+  .edit-details-grid {
+    grid-template-columns: 1fr !important;
+  }
+}

@@ -1,0 +1,66 @@
+name = "ilm-backend"
+main = "src/app.ts"
+compatibility_date = "2025-09-01"
+compatibility_flags = ["nodejs_compat"]
+
+# The default CPU-time ceiling is too tight for the bulk-upload route,
+# which can run a couple hundred sequential bcrypt hashes on a large CSV
+# (see routes/admin/bulkUpload.ts) — 30s (the max this plan allows) gives
+# that room without raising the limit for every other, far cheaper route.
+[limits]
+cpu_ms = 30000
+
+# Non-secret config. Secrets (JWT_SECRET, DIRECT_DEBIT_WEBHOOK_SECRET) are
+# set with `wrangler secret put <NAME>` and never committed here — see
+# .dev.vars.example for the local-dev equivalent (git-ignored .dev.vars).
+[vars]
+NODE_ENV = "production"
+COOKIE_SECURE = "true"
+# Every branch-preview Pages deployment (<branch>.ilm-tracker.pages.dev)
+# is trusted automatically as a subdomain of this one entry — see
+# isOriginAllowed's comment in config/env.ts — so this never needs a new
+# entry added per feature branch, and never accumulates stale ones for
+# branches that no longer exist.
+CORS_ORIGIN = "https://ilm-tracker.pages.dev"
+
+# DATABASE_URL (the Neon Postgres connection string) is a secret, not a
+# [vars] entry — set with `wrangler secret put DATABASE_URL` in production;
+# see .dev.vars.example for the local-dev equivalent.
+
+# Backs the registration/change-password rate limiters (see
+# utils/rateLimit.ts) — login itself is rate-limited via a Cloudflare
+# native Rate Limiting Rule instead (the one free rule on this plan),
+# not app code.
+[[kv_namespaces]]
+binding = "RATE_LIMIT_KV"
+id = "b2a7f35c54e841c7a5321f07338cc1cc"
+
+# Staging — a genuinely separate Worker (name below), so it never shares
+# state, secrets, or deploys with production. Wrangler environments do
+# NOT inherit [vars]/bindings from the top level, so everything staging
+# needs is declared explicitly here, not left to fall through.
+[env.staging]
+name = "ilm-backend-staging"
+
+[env.staging.limits]
+cpu_ms = 30000
+
+[env.staging.vars]
+NODE_ENV = "staging"
+COOKIE_SECURE = "true"
+CORS_ORIGIN = "https://ilm-tracker-staging.pages.dev"
+
+# Separate from production's RATE_LIMIT_KV — rate-limit keys aren't
+# scoped by hostname, so sharing would let heavy staging testing exhaust
+# a real production user's registration/change-password limit if they
+# happen to share an IP.
+[[env.staging.kv_namespaces]]
+binding = "RATE_LIMIT_KV"
+id = "808b5d8121734207adbdb58e8f42a285"
+
+# E2E_TEST_BYPASS_SECRET is a secret (set with `wrangler secret put`, see
+# staging.yml's "Sync staging Worker secrets" step), never a [vars] entry
+# — and only ever set here, on staging. It lets the E2E suite's own login
+# attempts skip the login rate limiter (see rateLimit.ts's checkRateLimit)
+# without loosening it for anyone else; production never has this secret
+# set, so the bypass it enables can never fire there.

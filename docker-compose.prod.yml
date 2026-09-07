@@ -1,0 +1,26 @@
+# Production overlay — apply on top of the base file, never on its own:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+# ...or just use ./scripts/deploy-prod.sh, which always applies both files
+# together so this can't be forgotten.
+#
+# What this changes vs. the dev-shaped base file:
+#   - MySQL's port is no longer published to the host. In dev that port
+#     lets you connect a local DB client straight in; in production the
+#     database should only ever be reachable from other containers on the
+#     compose network, never from the host/internet.
+# This file intentionally does NOT change NODE_ENV (the backend Dockerfile
+# already hardcodes NODE_ENV=production for every build, dev or prod — logs
+# are structured JSON and error responses are generic in both cases) and
+# does NOT change ports for backend/frontend, since nothing in this repo
+# fronts them with a reverse proxy yet; put one in front and remove those
+# publishes here once you do.
+services:
+  db:
+    # `!override` is required here, not a plain `ports: []` — Compose merges
+    # list-type fields like `ports` across files by *concatenating* them,
+    # not replacing them, so a plain `[]` here is silently a no-op and the
+    # base file's `3306:3306` publish survives untouched. `!override` forces
+    # a real replace. (Verified: without it, `docker compose -f
+    # docker-compose.yml -f docker-compose.prod.yml config` still showed
+    # port 3306 published even with this file applied.)
+    ports: !override []

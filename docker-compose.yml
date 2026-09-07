@@ -1,0 +1,92 @@
+services:
+  # Local-dev-only, now that the backend runs on Cloudflare Workers and the
+  # frontend on Cloudflare Pages. This file's job is just: give
+  # `wrangler dev` a real Postgres to point DATABASE_URL at, and apply
+  # schema migrations to it. Production Postgres is a Neon database (see
+  # DEPLOY_RUNBOOK.md) — this file is never used to deploy anything.
+  db:
+    image: postgres:16
+    container_name: ilm_db
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "5432:5432"
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
+  # The backend's DB driver (@neondatabase/serverless) talks to Postgres
+  # over WebSocket, not a plain TCP connection — by default it expects
+  # Neon's own WebSocket-to-Postgres proxy, which only exists for real Neon
+  # hosts. wsproxy is Neon's own small Go proxy that speaks the same
+  # protocol in front of an ordinary Postgres instance, so `wrangler dev`
+  # (running on the host, outside Docker) can reach this container's
+  # Postgres exactly the way it'll reach production Neon — see
+  # backend/src/config/db.ts for the driver-side config this pairs with.
+  wsproxy:
+    image: ghcr.io/neondatabase/wsproxy:latest
+    container_name: ilm_wsproxy
+    restart: always
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      LISTEN_PORT: ":6543"
+      ALLOW_ADDR_REGEX: "^db:5432$$"
+    ports:
+      - "6543:6543"
+
+  liquibase:
+    image: liquibase/liquibase:4.29
+    container_name: ilm_liquibase
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      # Native Liquibase env vars (4.24+) — read by *any* invocation of the
+      # `liquibase` binary, so ad-hoc commands don't need to repeat
+      # --url/--username/--password/--changelog-file by hand, e.g.:
+      #   docker compose run --rm liquibase status --verbose
+      #   docker compose run --rm liquibase rollback-count 1
+      LIQUIBASE_COMMAND_URL: "jdbc:postgresql://db:5432/${POSTGRES_DB}"
+      LIQUIBASE_COMMAND_USERNAME: ${POSTGRES_USER}
+      LIQUIBASE_COMMAND_PASSWORD: ${POSTGRES_PASSWORD}
+      LIQUIBASE_COMMAND_CHANGELOG_FILE: changelog/changelog-master.xml
+    volumes:
+      - ./liquibase/changelog:/liquibase/changelog
+      - ./liquibase/drivers:/liquibase/lib
+    # No entrypoint override here on purpose: the image's own
+    # docker-entrypoint.sh treats a first arg it recognizes as a real OS
+    # command (like "sh") as "just exec this", and anything else as a bare
+    # liquibase subcommand run with the env vars above. Overriding
+    # entrypoint to `sh -c` unconditionally (as this used to do) broke every
+    # ad-hoc `docker compose run --rm liquibase <command>` invocation — the
+    # command ran as a literal shell command instead of ever reaching
+    # liquibase (e.g. `status --verbose` failed with "status: not found").
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        # `db` reporting "healthy" doesn't guarantee it's still up by the
+        # time we connect, so retry a few times instead of failing the
+        # whole `docker compose up` on one transient "connection refused".
+        for i in $(seq 1 15); do
+          if liquibase update; then
+            exit 0
+          fi
+          echo "liquibase: db not reachable yet, retrying in 3s ($$i/15)..."
+          sleep 3
+        done
+        exit 1
+
+volumes:
+  db_data:

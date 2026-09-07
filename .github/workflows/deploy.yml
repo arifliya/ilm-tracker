@@ -1,0 +1,312 @@
+name: Deploy
+
+# Triggered only by publishing a GitHub Release — never by a plain push to
+# main. github.sha for a `release` event already resolves to the exact
+# commit the release's tag points at, so every job below checks that out
+# explicitly and consistently (not github.event.release.target_commitish,
+# which is only the branch/commit a *new* tag would be created from if it
+# didn't already exist — not a reliable "this release's commit" pointer).
+on:
+  release:
+    types: [published]
+
+# Prevent two releases published in quick succession from racing
+# migration/deploy steps against the same Worker/Pages/database.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  verify-release-on-main:
+    name: Verify release commit is on main
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+
+      - name: Confirm release commit is an ancestor of main
+        run: |
+          RELEASE_SHA="${{ github.sha }}"
+          git fetch origin main --depth=1000
+          if ! git merge-base --is-ancestor "$RELEASE_SHA" origin/main; then
+            echo "::error::Release commit $RELEASE_SHA is not reachable from origin/main. Refusing to deploy — this release was likely created off the wrong branch/commit."
+            exit 1
+          fi
+          echo "Release commit $RELEASE_SHA confirmed on main." >> "$GITHUB_STEP_SUMMARY"
+
+  test-backend:
+    name: Backend test/build gate
+    needs: verify-release-on-main
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 26
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build
+      - run: npx @redocly/cli lint openapi.yaml
+
+  test-frontend:
+    name: Frontend test/build gate
+    needs: verify-release-on-main
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 26
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build
+
+  migrate-database:
+    name: Check + apply database migrations
+    needs: [test-backend, test-frontend]
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: liquibase
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Parse DATABASE_URL into JDBC pieces
+        id: dburl
+        run: |
+          node -e '
+            const u = new URL(process.env.DATABASE_URL);
+            const host = u.hostname + (u.port ? ":" + u.port : "");
+            const db = u.pathname.replace(/^\//, "");
+            const params = new URLSearchParams(u.search);
+            if (!params.has("sslmode")) params.set("sslmode", "require");
+            console.log(`jdbc_url=jdbc:postgresql://${host}/${db}?${params.toString()}`);
+            console.log(`username=${decodeURIComponent(u.username)}`);
+          ' >> "$GITHUB_OUTPUT"
+          # Password is written separately so it never appears in this
+          # step's own stdout/logs, only piped straight into GITHUB_OUTPUT.
+          node -e 'console.log(decodeURIComponent(new URL(process.env.DATABASE_URL).password))' | \
+            (read -r pw; echo "password=$pw" >> "$GITHUB_OUTPUT")
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+      - name: Mask parsed credentials in logs
+        run: |
+          echo "::add-mask::${{ steps.dburl.outputs.username }}"
+          echo "::add-mask::${{ steps.dburl.outputs.password }}"
+
+      - name: Check for pending changesets
+        id: status
+        run: |
+          OUTPUT=$(docker run --rm \
+            -v "$(pwd)/changelog:/liquibase/changelog" \
+            -v "$(pwd)/drivers:/liquibase/lib" \
+            -e LIQUIBASE_COMMAND_URL="${{ steps.dburl.outputs.jdbc_url }}" \
+            -e LIQUIBASE_COMMAND_USERNAME="${{ steps.dburl.outputs.username }}" \
+            -e LIQUIBASE_COMMAND_PASSWORD="${{ steps.dburl.outputs.password }}" \
+            -e LIQUIBASE_COMMAND_CHANGELOG_FILE="changelog/changelog-master.xml" \
+            liquibase/liquibase:4.29 status --verbose)
+          echo "$OUTPUT"
+          {
+            echo "### Liquibase status"
+            echo '```'
+            echo "$OUTPUT"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if echo "$OUTPUT" | grep -q "is up to date"; then
+            echo "pending=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "pending=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Apply pending changesets
+        if: steps.status.outputs.pending == 'true'
+        run: |
+          docker run --rm \
+            -v "$(pwd)/changelog:/liquibase/changelog" \
+            -v "$(pwd)/drivers:/liquibase/lib" \
+            -e LIQUIBASE_COMMAND_URL="${{ steps.dburl.outputs.jdbc_url }}" \
+            -e LIQUIBASE_COMMAND_USERNAME="${{ steps.dburl.outputs.username }}" \
+            -e LIQUIBASE_COMMAND_PASSWORD="${{ steps.dburl.outputs.password }}" \
+            -e LIQUIBASE_COMMAND_CHANGELOG_FILE="changelog/changelog-master.xml" \
+            liquibase/liquibase:4.29 update
+          echo "Applied pending changesets." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: No pending changesets
+        if: steps.status.outputs.pending == 'false'
+        run: echo "No pending changesets — skipping update." >> "$GITHUB_STEP_SUMMARY"
+
+  deploy-backend:
+    name: Deploy backend (Worker)
+    needs: migrate-database
+    runs-on: ubuntu-latest
+    outputs:
+      # The version that was live immediately before this run's deploy —
+      # captured now so deploy-frontend's failure path below has a concrete,
+      # verified rollback target instead of a guess. `wrangler deployments
+      # list --json` returns oldest-first, so the last element is what's
+      # currently live; `versions[0].version_id` (not the top-level `id`)
+      # is what `wrangler rollback` actually takes, confirmed against the
+      # real account — same field rollback.yml's manual dispatch expects.
+      previous_version_id: ${{ steps.previous-version.outputs.id }}
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 26
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - run: npm ci
+
+      - name: Record currently-live version
+        id: previous-version
+        run: |
+          ID=$(npx wrangler deployments list --name ilm-backend --json | \
+            node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{
+              const deployments = JSON.parse(d);
+              const live = deployments[deployments.length - 1];
+              console.log(live?.versions?.[0]?.version_id ?? "");
+            })')
+          if [ -z "$ID" ]; then
+            echo "::warning::Could not determine the currently-live Worker version (first-ever deploy?) — automatic rollback on frontend failure will be skipped."
+          fi
+          echo "id=$ID" >> "$GITHUB_OUTPUT"
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+
+      - run: npm run deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+
+      - name: Smoke test
+        run: |
+          sleep 5
+          curl -sf https://ilm-backend.jassat-ibrahim.workers.dev/healthz
+
+  deploy-frontend:
+    name: Deploy frontend (Pages)
+    # Sequential, not parallel with deploy-backend: the frontend calls the
+    # backend API, so if the backend's own deploy/smoke-test fails, the
+    # frontend must never publish pointing at a Worker that isn't actually
+    # live. This also narrows the remaining failure mode to one direction —
+    # new backend + old frontend (generally backward-compatible) — instead
+    # of both orderings being possible, and it's what makes the automatic
+    # rollback job below well-defined (it only ever needs to undo the
+    # backend, never the frontend).
+    needs: deploy-backend
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 26
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - run: npm ci
+      - run: npm run build
+        env:
+          VITE_API_URL: https://ilm-backend.jassat-ibrahim.workers.dev/api
+
+      # --branch main pins this deployment to the production Pages domain
+      # regardless of the runner's actual git ref (checkout leaves it in
+      # detached HEAD at the release commit, not literally "main").
+      - run: npx wrangler pages deploy dist --project-name=ilm-tracker --branch main
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+
+  rollback-backend-on-frontend-failure:
+    name: Auto-rollback backend if frontend deploy failed
+    needs: [deploy-backend, deploy-frontend]
+    if: ${{ always() && needs.deploy-backend.result == 'success' && needs.deploy-frontend.result == 'failure' && needs.deploy-backend.outputs.previous_version_id != '' }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 26
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - run: npm ci
+
+      # Backend deploy succeeded but frontend's failed — a new backend is
+      # live with no matching frontend deployed for it. Roll the backend
+      # back to what was live before this run, matching the frontend that's
+      # already still serving (this job never touches the frontend, since
+      # it never changed). The Worker rollback itself is fast and safe to
+      # automate, unlike database rollback (rollback.yml), which stays
+      # manual/approval-gated because it can be destructive.
+      - name: Roll back to the pre-release version
+        run: |
+          npx wrangler rollback "${{ needs.deploy-backend.outputs.previous_version_id }}" \
+            --name ilm-backend \
+            -m "Automatic rollback: frontend deploy failed for release ${{ github.event.release.tag_name }}" \
+            -y
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+
+      - name: Smoke test
+        run: |
+          sleep 5
+          curl -sf https://ilm-backend.jassat-ibrahim.workers.dev/healthz
+
+      - name: Record what happened
+        run: |
+          {
+            echo "### Automatic backend rollback"
+            echo "The frontend deploy failed after the backend deploy succeeded for this release."
+            echo "Rolled the backend back to version \`${{ needs.deploy-backend.outputs.previous_version_id }}\` (what was live before this run)."
+            echo "The frontend was never changed by this release, so it's already consistent with the rolled-back backend."
+            echo ""
+            echo "Once the frontend issue is fixed, re-publish the release (or re-run this workflow) to deploy both again."
+          } >> "$GITHUB_STEP_SUMMARY"

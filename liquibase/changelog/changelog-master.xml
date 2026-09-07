@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.20.xsd">
+
+    <!--
+        Add new changesets by appending new <include> lines below in the
+        order they should run. Never edit or reorder a file that has
+        already been applied anywhere (dev, staging, prod) — Liquibase
+        checksums each changeset and will refuse to re-run a modified one.
+        Add a new numbered file instead (002-..., 003-..., ...).
+    -->
+
+    <include file="changelog/001-baseline-schema.sql" relativeToChangelogFile="false"/>
+    <include file="changelog/002-direct-debit.sql" relativeToChangelogFile="false"/>
+    <include file="changelog/003-performance-indexes.sql" relativeToChangelogFile="false"/>
+    <include file="changelog/004-parent-contact-audit.sql" relativeToChangelogFile="false"/>
+    <include file="changelog/005-must-reset-password.sql" relativeToChangelogFile="false"/>
+    <include file="changelog/006-class-membership-indexes.sql" relativeToChangelogFile="false"/>
+
+</databaseChangeLog>
