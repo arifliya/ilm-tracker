@@ -24,6 +24,7 @@ interface UserEmailRoleRow {
   id: number;
   email: string;
   role_name: string;
+  school_id: number | null;
 }
 
 /* ============================================================
@@ -91,7 +92,7 @@ router.post("/students/bulk-upload", authMiddleware, ADMIN_ONLY, async c => {
   const { rows: userRows } =
     parentEmails.length > 0
       ? await db.query<UserEmailRoleRow>(
-          `SELECT u.id, u.email, r.name AS role_name FROM users u JOIN roles r ON r.id = u.role_id WHERE u.email = ANY($1)`,
+          `SELECT u.id, u.email, u.school_id, r.name AS role_name FROM users u JOIN roles r ON r.id = u.role_id WHERE u.email = ANY($1)`,
           [parentEmails]
         )
       : { rows: [] as UserEmailRoleRow[] };
@@ -135,6 +136,17 @@ router.post("/students/bulk-upload", authMiddleware, ADMIN_ONLY, async c => {
       continue;
     }
 
+    // Emails are globally unique (see users.email's UNIQUE constraint), but
+    // a match here must still only be reused as "the same parent, another
+    // guardian link" within this school. Without this check, an email that
+    // happens to belong to a different school's parent would silently
+    // attach that stranger as an approved guardian of this school's
+    // student — a cross-tenant data leak, not just a false-positive match.
+    if (existingUser && existingUser.school_id !== schoolId) {
+      results.push({ row: rowNum, status: "error", message: `${parentEmail} belongs to an account in a different school` });
+      continue;
+    }
+
     try {
       await db.query("BEGIN");
 
@@ -151,7 +163,16 @@ router.post("/students/bulk-upload", authMiddleware, ADMIN_ONLY, async c => {
         parentId = existingParent.id;
       } else {
         temporaryPassword = generateTemporaryPassword();
-        const passwordHash = await bcrypt.hash(temporaryPassword, 10);
+        // Cost 8, not the usual 10: this runs synchronously in the Worker's
+        // request path, once per new parent in the batch (plus another
+        // per-row hash in createStudentLogin below when student logins are
+        // provisioned) — up to MAX_BULK_UPLOAD_ROWS x 2 sequential hashes.
+        // At cost 10 (~50ms/hash) a full batch alone can exceed the Worker's
+        // CPU-time limit; cost 8 (~12ms/hash) keeps a full batch's worth
+        // comfortably under it. Safe to lower here specifically because
+        // this is a machine-generated, one-time password forced to reset on
+        // first login, not a user-chosen one — see generateTemporaryPassword.
+        const passwordHash = await bcrypt.hash(temporaryPassword, 8);
 
         const {
           rows: [userResult]

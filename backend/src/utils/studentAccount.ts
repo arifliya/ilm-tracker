@@ -34,7 +34,12 @@ export const createStudentLogin = async (
 
   const username = await generateUniqueUsername(conn, firstName, surname);
   const temporaryPassword = generateTemporaryPassword();
-  const passwordHash = await bcrypt.hash(temporaryPassword, 10);
+  // Cost 8, not the usual 10 — see the matching comment in bulkUpload.ts.
+  // This runs once per student when called from the bulk-upload loop
+  // (alongside a per-row parent hash there), so the same CPU-time-budget
+  // reasoning applies; safe here for the same reason: a machine-generated,
+  // one-time password forced to reset on first login, not user-chosen.
+  const passwordHash = await bcrypt.hash(temporaryPassword, 8);
 
   const {
     rows: [userResult]

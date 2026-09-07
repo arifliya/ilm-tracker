@@ -1610,12 +1610,33 @@ describe("POST /api/admin/students/bulk-upload", () => {
     expect(res.body.results[0].message).toMatch(/non-parent account/);
   });
 
+  it("errors a row whose email belongs to a parent account in a different school", async () => {
+    mockQuery
+      .mockResolvedValueOnce(rows([{ id: 9 }])) // parent role lookup
+      .mockResolvedValueOnce(rows([{ id: 7 }])) // student role lookup
+      .mockResolvedValueOnce(rows([{ id: 77, class_code: "7A" }])) // batch class lookup
+      // Same email, valid "parent" role, but a different school_id than the
+      // requesting admin's (10) — must not be treated as reusable, or this
+      // row would silently attach a different school's parent as an
+      // approved guardian of this school's student.
+      .mockResolvedValueOnce(rows([{ id: 55, email: "jane.doe@example.com", role_name: "parent", school_id: 99 }])); // batch parent-email lookup, different school
+
+    const res = await request(app)
+      .post("/api/admin/students/bulk-upload")
+      .set("Cookie", adminCookie)
+      .send({ rows: [goodRow()] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.results[0]).toMatchObject({ row: 1, status: "error" });
+    expect(res.body.results[0].message).toMatch(/different school/);
+  });
+
   it("links an existing parent (by email) as an additional guardian without creating a new account", async () => {
     mockQuery
       .mockResolvedValueOnce(rows([{ id: 9 }])) // parent role lookup
       .mockResolvedValueOnce(rows([{ id: 7 }])) // student role lookup
       .mockResolvedValueOnce(rows([{ id: 77, class_code: "7A" }])) // batch class lookup
-      .mockResolvedValueOnce(rows([{ id: 55, email: "jane.doe@example.com", role_name: "parent" }])) // batch parent-email lookup
+      .mockResolvedValueOnce(rows([{ id: 55, email: "jane.doe@example.com", role_name: "parent", school_id: 10 }])) // batch parent-email lookup, same school
       .mockResolvedValueOnce(rows([])) // BEGIN
       .mockResolvedValueOnce(rows([{ id: 200 }])) // parents lookup by user_id
       .mockResolvedValueOnce(rows([])) // guardian_code uniqueness check
@@ -1669,7 +1690,7 @@ describe("POST /api/admin/students/bulk-upload", () => {
       // ("7A") and email resolve to anything; row 2's "BADCODE" isn't in
       // the result set at all, so it never reaches the database.
       .mockResolvedValueOnce(rows([{ id: 77, class_code: "7A" }])) // batch class lookup
-      .mockResolvedValueOnce(rows([{ id: 55, email: "jane.doe@example.com", role_name: "parent" }])) // batch parent-email lookup
+      .mockResolvedValueOnce(rows([{ id: 55, email: "jane.doe@example.com", role_name: "parent", school_id: 10 }])) // batch parent-email lookup, same school
       // Row 1 (good, existing parent):
       .mockResolvedValueOnce(rows([])) // BEGIN
       .mockResolvedValueOnce(rows([{ id: 200 }])) // parents lookup by user_id
@@ -1699,7 +1720,7 @@ describe("POST /api/admin/students/bulk-upload", () => {
       .mockResolvedValueOnce(rows([{ id: 9 }])) // parent role lookup
       .mockResolvedValueOnce(rows([{ id: 7 }])) // student role lookup
       .mockResolvedValueOnce(rows([{ id: 77, class_code: "7A" }])) // batch class lookup
-      .mockResolvedValueOnce(rows([{ id: 55, email: "jane.doe@example.com", role_name: "parent" }])) // batch parent-email lookup
+      .mockResolvedValueOnce(rows([{ id: 55, email: "jane.doe@example.com", role_name: "parent", school_id: 10 }])) // batch parent-email lookup, same school
       .mockResolvedValueOnce(rows([])) // BEGIN
       .mockResolvedValueOnce(rows([{ id: 200 }])) // parents lookup by user_id
       .mockResolvedValueOnce(rows([])) // guardian_code uniqueness check

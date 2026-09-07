@@ -17,12 +17,20 @@ export function cookieOptions(secure: boolean) {
     httpOnly: true,
     secure,
     // *.pages.dev and *.workers.dev are different registrable domains —
-    // different "sites" as far as the SameSite spec is concerned — so this
-    // is a genuinely cross-site request, not just cross-origin. SameSite=Lax
-    // would silently not be sent. Revisit once both sit on the same custom
-    // domain (e.g. app.example.com / api.example.com), where Lax would work
-    // again and be the tighter choice.
-    sameSite: "None" as const,
+    // different "sites" as far as the SameSite spec is concerned — so a
+    // real deployment is a genuinely cross-site request, not just
+    // cross-origin, and needs SameSite=None to have the cookie sent at all.
+    // But SameSite=None is only valid alongside Secure — a browser drops
+    // the cookie outright otherwise — so this can't be hardcoded to "None"
+    // independently of `secure`: local dev runs COOKIE_SECURE=false over
+    // plain http://localhost, and pairing that with SameSite=None would
+    // mean the login cookie silently never gets stored. Locally,
+    // frontend/backend are both on "localhost" (different ports only), so
+    // they're still the same *site*, and Lax already covers that fine.
+    // Revisit once a real deployment sits on one shared custom domain too
+    // (e.g. app.example.com / api.example.com) — Lax would work there as
+    // the tighter choice, same as local dev today.
+    sameSite: (secure ? "None" : "Lax") as "None" | "Lax",
     path: "/"
   };
 }

@@ -3,6 +3,13 @@ main = "src/app.ts"
 compatibility_date = "2025-09-01"
 compatibility_flags = ["nodejs_compat"]
 
+# The default CPU-time ceiling is too tight for the bulk-upload route,
+# which can run a couple hundred sequential bcrypt hashes on a large CSV
+# (see routes/admin/bulkUpload.ts) — 30s (the max this plan allows) gives
+# that room without raising the limit for every other, far cheaper route.
+[limits]
+cpu_ms = 30000
+
 # Non-secret config. Secrets (JWT_SECRET, DIRECT_DEBIT_WEBHOOK_SECRET) are
 # set with `wrangler secret put <NAME>` and never committed here — see
 # .dev.vars.example for the local-dev equivalent (git-ignored .dev.vars).
@@ -34,6 +41,9 @@ id = "b2a7f35c54e841c7a5321f07338cc1cc"
 # needs is declared explicitly here, not left to fall through.
 [env.staging]
 name = "ilm-backend-staging"
+
+[env.staging.limits]
+cpu_ms = 30000
 
 [env.staging.vars]
 NODE_ENV = "staging"
